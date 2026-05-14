@@ -1089,7 +1089,7 @@ function renderClasificacion(limit) {
                 <td class="text-slate-400 font-mono">${u.telefono||'—'}</td>
                 <td class="text-center"><span class="pill ${tierColor[u.nivel]}">${u.nivel==='Sin clasificar'?'Sin nivel':u.nivel}</span></td>
                 <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[u.programa]||'Sin definir'}</span></td>
-                <td class="text-[14px]">${u.sin_tienda?'<span class="pill bg-red-500/20 text-red-300 border-red-500/40 text-[10px]">⚠ Sin tienda</span>':((u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—')}</td>
+                <td class="text-[14px]">${u.sin_tienda?'<span class="pill bg-red-500/20 text-red-300 border-red-500/40 text-[10px]">⚠ Sin tienda</span>':((u.paises_unicos||u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—')}</td>
                 ${DATA.meta.ventana.map(m => `<td class="text-right font-mono text-slate-400">${fmt(u.ped_mes[m])}</td>`).join('')}
                 <td class="text-right font-mono font-semibold text-slate-100">${fmt(u.total_pedidos)}</td>
                 <td class="text-right font-mono ${u.pct_dev>15?'text-orange-400':u.pct_dev>10?'text-yellow-400':'text-slate-400'}">${u.pct_dev}%</td>
@@ -1355,7 +1355,7 @@ function renderAlertas() {
                 <td class="text-slate-400">${u.email||'—'}</td>
                 <td class="text-slate-400 font-mono">${u.telefono||'—'}</td>
                 <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[u.programa]||'Sin definir'}</span></td>
-                <td class="text-[14px]">${(u.paises||[]).map(p => flag(p)).join(' ')||'—'}</td>
+                <td class="text-[14px]">${(u.paises_unicos||u.paises||[]).map(p => flag(p)).join(' ')||'—'}</td>
                 <td class="text-center"><span class="pill ${tierColor[u.nivel]}">${u.nivel==='Sin clasificar'?'Sin nivel':u.nivel}</span></td>
                 ${months.map(m => `<td class="text-right font-mono ${(u.ped_mes[m]||0)===0?'text-slate-700':'text-slate-400'}">${fmt(u.ped_mes[m])}</td>`).join('')}
                 <td class="text-center"><span class="inline-flex items-center gap-1.5"><span class="w-2 h-2 rounded-full ${semColor2[u.semaforo]||'bg-slate-500'}"></span><span class="text-[10px] font-semibold">${semLabel2[u.semaforo]||'—'}</span></span></td>
@@ -2490,6 +2490,25 @@ function drawCharts() {
 }
 
 render();
+</script>
+
+<!-- Twemoji: renderiza emojis (banderas) como imágenes para que se vean
+     idéntico en Mac/Windows/Linux/móvil. Sin esto, Windows muestra los
+     emojis de banderas como letras "Regional Indicator" (ej. "🇨🇴" → "CO"). -->
+<script src="https://cdn.jsdelivr.net/npm/@twemoji/api@15.1.0/dist/twemoji.min.js" crossorigin="anonymous"></script>
+<style>img.twemoji{height:1em;width:auto;vertical-align:-0.125em;display:inline-block;margin:0 1px}</style>
+<script>
+(function(){
+  if (!window.twemoji) return;
+  const opts = {className: 'twemoji', folder: 'svg', ext: '.svg'};
+  const parse = node => { try { twemoji.parse(node, opts); } catch(e){} };
+  parse(document.body);
+  // Re-parsear contenido dinámico (cambios de tab, filtros, búsqueda)
+  new MutationObserver(muts => {
+    for (const m of muts) for (const n of m.addedNodes)
+      if (n.nodeType === 1) parse(n);
+  }).observe(document.body, {childList: true, subtree: true});
+})();
 </script>
 </body>
 </html>
