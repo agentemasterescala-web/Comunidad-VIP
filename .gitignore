@@ -27,6 +27,10 @@ datos/procesados/writeback_run.log
 # ── Locks (uso runtime de los pipelines) ───────────────────────
 **/.pipeline.lock
 **/.dashboard.lock
+**/.publish.lock
+
+# ── Worktree de publicación (rama gh-pages) ────────────────────
+_publish/
 
 # ── Python ──────────────────────────────────────────────────────
 __pycache__/
