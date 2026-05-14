@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.masterescala.comunidad-vip-publish</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__INSTALL_DIR__/publicar_dashboard.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__INSTALL_DIR__</string>
+
+    <!-- Dispara a las 09:00 y 14:00 hora local de la Mac todos los días. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>14</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <!-- Si la Mac está dormida a la hora exacta, dispara al despertar. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__INSTALL_DIR__/logs/launchd-publish.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__INSTALL_DIR__/logs/launchd-publish.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

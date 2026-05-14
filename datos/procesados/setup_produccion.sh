@@ -26,6 +26,10 @@ LABEL_WT="com.masterescala.comunidad-vip-watcher"
 PLIST_SRC_WT="$HERE/launchd/com.masterescala.comunidad-vip-watcher.plist.template"
 PLIST_DST_WT="$HOME/Library/LaunchAgents/$LABEL_WT.plist"
 
+LABEL_PB="com.masterescala.comunidad-vip-publish"
+PLIST_SRC_PB="$HERE/launchd/com.masterescala.comunidad-vip-publish.plist.template"
+PLIST_DST_PB="$HOME/Library/LaunchAgents/$LABEL_PB.plist"
+
 # Carpeta a vigilar (originales — donde tu equipo arrastra los Excel mensuales)
 ORIGINALES_DIR="$(cd "$HERE/../originales" && pwd)"
 
@@ -64,8 +68,29 @@ EOF
 fi
 echo
 
+# ── 2.5) Worktree gh-pages para publicar ────────────────
+echo "▶ [2.5/5] Worktree gh-pages para publicar dashboard"
+PROJECT_ROOT="$(cd "$HERE/../.." && pwd)"
+PUBLISH_DIR="$PROJECT_ROOT/_publish"
+if git -C "$PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  if [ -d "$PUBLISH_DIR/.git" ] || [ -f "$PUBLISH_DIR/.git" ]; then
+    echo "  ✓ Worktree _publish/ ya existe"
+  else
+    git -C "$PROJECT_ROOT" fetch origin gh-pages 2>/dev/null || true
+    if git -C "$PROJECT_ROOT" worktree add "$PUBLISH_DIR" gh-pages >/dev/null 2>&1; then
+      echo "  ✓ Worktree _publish/ creado en rama gh-pages"
+    else
+      echo "  ⚠ No se pudo crear worktree gh-pages — publish job no funcionará"
+      echo "    (revisá que la rama gh-pages exista en el remoto)"
+    fi
+  fi
+else
+  echo "  ⚠ Este directorio no es repo git — publish job no funcionará"
+fi
+echo
+
 # ── 3) launchd plists ───────────────────────────────────
-echo "▶ [3/5] Generando 3 launchd plists (writeback + dashboard + watcher)"
+echo "▶ [3/5] Generando 4 launchd plists (writeback + dashboard + watcher + publish)"
 mkdir -p "$HOME/Library/LaunchAgents" logs
 sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC" > "$PLIST_DST"
 chmod 644 "$PLIST_DST"
@@ -76,6 +101,9 @@ echo "  ✓ Dashboard plist: $PLIST_DST_DB"
 sed -e "s|__INSTALL_DIR__|$HERE|g" -e "s|__ORIGINALES_DIR__|$ORIGINALES_DIR|g" "$PLIST_SRC_WT" > "$PLIST_DST_WT"
 chmod 644 "$PLIST_DST_WT"
 echo "  ✓ Watcher plist:  $PLIST_DST_WT (vigila $ORIGINALES_DIR)"
+sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC_PB" > "$PLIST_DST_PB"
+chmod 644 "$PLIST_DST_PB"
+echo "  ✓ Publish plist:  $PLIST_DST_PB (09:00 y 14:00 hora local)"
 echo
 
 # ── 4) Cargar en launchd ────────────────────────────────
@@ -86,9 +114,12 @@ launchctl unload "$PLIST_DST_DB" 2>/dev/null || true
 launchctl load -w "$PLIST_DST_DB"
 launchctl unload "$PLIST_DST_WT" 2>/dev/null || true
 launchctl load -w "$PLIST_DST_WT"
+launchctl unload "$PLIST_DST_PB" 2>/dev/null || true
+launchctl load -w "$PLIST_DST_PB"
 launchctl list | grep -q "$LABEL"    && echo "  ✓ Writeback cargado (cada 10 min)"        || echo "  ⚠ Writeback no se ve"
 launchctl list | grep -q "$LABEL_DB" && echo "  ✓ Dashboard cargado (cada 90 segundos)"    || echo "  ⚠ Dashboard no se ve"
 launchctl list | grep -q "$LABEL_WT" && echo "  ✓ Watcher cargado  (instantáneo al subir Excel)" || echo "  ⚠ Watcher no se ve"
+launchctl list | grep -q "$LABEL_PB" && echo "  ✓ Publish cargado  (09:00 y 14:00)"       || echo "  ⚠ Publish no se ve"
 echo
 
 # ── 5) Run-now de prueba ────────────────────────────────
