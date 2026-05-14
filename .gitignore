@@ -1,0 +1,51 @@
+# ── Credenciales y configuración local ─────────────────────────
+**/.env
+**/.env.local
+
+# ── Carpetas legacy / no relacionadas con la pipeline ──────────
+_archivo/
+docs/
+.claude/
+
+# ── Datos sensibles (no subir a git por LOPD/datos personales) ──
+# Excel mensuales de Dropi contienen emails y teléfonos de usuarios.
+# Soporta tanto carpeta como symlink a la sincronización de Drive.
+datos/originales/
+datos/originales
+
+# ── Artifacts regenerables por la pipeline ─────────────────────
+datos/procesados/ghl_contacts_raw.json
+datos/procesados/maestro_emails.xlsx
+datos/procesados/clasificacion_usuarios.xlsx
+datos/procesados/dashboard.html
+datos/procesados/writeback_run.log
+
+# ── Logs ───────────────────────────────────────────────────────
+**/logs/
+**/*.log
+
+# ── Locks (uso runtime de los pipelines) ───────────────────────
+**/.pipeline.lock
+**/.dashboard.lock
+
+# ── Python ──────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# ── Node ────────────────────────────────────────────────────────
+node_modules/
+package-lock.json
+
+# ── macOS / Office basura ──────────────────────────────────────
+.DS_Store
+~$*
+*.tmp
+
+# ── Editor/IDE ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
