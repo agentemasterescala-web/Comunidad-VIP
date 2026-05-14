@@ -1,7 +1,7 @@
 #!/bin/bash
 # Refresca el dashboard y lo publica en la rama gh-pages del repo.
 # GitHub Pages sirve el HTML en una URL estática que se embebe en GHL.
-# Disparado por launchd a las 09:00 y 14:00 hora local de la Mac.
+# Disparado por launchd a las 09:00, 14:00 y 18:00 hora local de la Mac.
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

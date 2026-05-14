@@ -103,7 +103,7 @@ chmod 644 "$PLIST_DST_WT"
 echo "  ✓ Watcher plist:  $PLIST_DST_WT (vigila $ORIGINALES_DIR)"
 sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC_PB" > "$PLIST_DST_PB"
 chmod 644 "$PLIST_DST_PB"
-echo "  ✓ Publish plist:  $PLIST_DST_PB (09:00 y 14:00 hora local)"
+echo "  ✓ Publish plist:  $PLIST_DST_PB (09:00, 14:00 y 18:00 hora local)"
 echo
 
 # ── 4) Cargar en launchd ────────────────────────────────
@@ -119,7 +119,7 @@ launchctl load -w "$PLIST_DST_PB"
 launchctl list | grep -q "$LABEL"    && echo "  ✓ Writeback cargado (cada 10 min)"        || echo "  ⚠ Writeback no se ve"
 launchctl list | grep -q "$LABEL_DB" && echo "  ✓ Dashboard cargado (cada 90 segundos)"    || echo "  ⚠ Dashboard no se ve"
 launchctl list | grep -q "$LABEL_WT" && echo "  ✓ Watcher cargado  (instantáneo al subir Excel)" || echo "  ⚠ Watcher no se ve"
-launchctl list | grep -q "$LABEL_PB" && echo "  ✓ Publish cargado  (09:00 y 14:00)"       || echo "  ⚠ Publish no se ve"
+launchctl list | grep -q "$LABEL_PB" && echo "  ✓ Publish cargado  (09:00, 14:00 y 18:00)" || echo "  ⚠ Publish no se ve"
 echo
 
 # ── 5) Run-now de prueba ────────────────────────────────
