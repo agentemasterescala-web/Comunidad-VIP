@@ -196,6 +196,36 @@ def first_seen_month(maestro, email):
     return min(r["mes"] for r in rows if r.get("mes"))
 
 
+def clasificar_nivel(ped_values):
+    """Aplica las reglas de escalafón a los pedidos mensuales de un usuario.
+    `ped_values` es un iterable de pedidos por mes (ej. ped_mes.values()).
+    Devuelve: Diamante / Platino / Oro / Plata / Bronce / Sin clasificar.
+
+    Reglas (idénticas a las del loop de clasificación VIP):
+      - <2 meses con ventas o suma top-2 < 60  → Sin clasificar
+      - exactamente 2 meses con ventas         → Bronce
+      - 3+ meses con ventas, según suma top-3:
+          >= 15000 Diamante · >= 3000 Platino · >= 900 Oro · >= 300 Plata · resto Bronce
+    """
+    vals = list(ped_values)
+    active = sum(1 for v in vals if v > 0)
+    sv = sorted(vals, reverse=True)
+    top1 = sv[0] if sv else 0
+    top2 = sv[1] if len(sv) > 1 else 0
+    top3 = sv[2] if len(sv) > 2 else 0
+    suma_top2 = top1 + top2
+    suma_top3 = top1 + top2 + top3
+    if active < 2 or suma_top2 < 60:
+        return "Sin clasificar"
+    if active < 3:
+        return "Bronce"
+    if suma_top3 >= 15000: return "Diamante"
+    if suma_top3 >= 3000:  return "Platino"
+    if suma_top3 >= 900:   return "Oro"
+    if suma_top3 >= 300:   return "Plata"
+    return "Bronce"
+
+
 VIP_TAG = "comunidad vip new"
 
 def compute_all():
@@ -291,15 +321,7 @@ def compute_all():
         top1 = sv[0]; top2 = sv[1] if len(sv) > 1 else 0; top3 = sv[2] if len(sv) > 2 else 0
         suma_top2 = top1 + top2
         suma_top3 = top1 + top2 + top3
-        if active < 2 or suma_top2 < 60:
-            nivel = "Sin clasificar"
-        elif active < 3:
-            nivel = "Bronce"
-        elif suma_top3 >= 15000: nivel = "Diamante"
-        elif suma_top3 >= 3000:  nivel = "Platino"
-        elif suma_top3 >= 900:   nivel = "Oro"
-        elif suma_top3 >= 300:   nivel = "Plata"
-        else: nivel = "Bronce"
+        nivel = clasificar_nivel(ped_mes.values())
 
         # alertas
         en_riesgo = (
@@ -529,6 +551,8 @@ def compute_all():
             "n_meses_activos": len(meses_activos_em),
             "tiene_ventas": total_ped > 0,
             "ped_mes": ped_mes_em,
+            # Escalafón calculado con las mismas reglas VIP, aunque no estén en GHL.
+            "nivel": clasificar_nivel(ped_mes_em.values()),
         })
     met_dropi_sin_ghl.sort(key=lambda x: -x["total_pedidos"])
 
@@ -2047,6 +2071,7 @@ function renderMetDropiGHL() {
               <th class="text-left">Nombre</th>
               <th class="text-left">Teléfono</th>
               <th class="text-left">Países</th>
+              <th class="text-center">Escalafón</th>
               ${monthCols}
               <th class="text-right">Total ped.</th>
               <th class="text-center">Meses act.</th>
@@ -2059,6 +2084,7 @@ function renderMetDropiGHL() {
                 <td class="text-slate-300">${tc(u.nombre)||'—'}</td>
                 <td class="text-slate-400 font-mono">${u.telefono||'—'}</td>
                 <td class="text-[14px]">${(u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—'}</td>
+                <td class="text-center"><span class="pill ${tierColor[u.nivel]}">${u.nivel==='Sin clasificar'?'Sin nivel':u.nivel}</span></td>
                 ${months.map(m2 => `<td class="text-right font-mono ${(u.ped_mes[m2]||0)===0?'text-slate-700':'text-slate-400'}">${fmt(u.ped_mes[m2])}</td>`).join('')}
                 <td class="text-right font-mono font-semibold ${u.total_pedidos>0?'text-slate-100':'text-slate-600'}">${fmt(u.total_pedidos)}</td>
                 <td class="text-center font-mono text-slate-400">${u.n_meses_activos}/${months.length}</td>
@@ -2199,9 +2225,9 @@ function wireMetDropiGHL() {
       const s = metDropiSearch.toLowerCase();
       list = list.filter(u => (u.email||'').toLowerCase().includes(s) || (u.nombre||'').toLowerCase().includes(s) || (u.telefono||'').includes(s));
     }
-    const header = ["Email","Nombre","Teléfono","Países", ...months, "Total pedidos","Meses activos"];
+    const header = ["Email","Nombre","Teléfono","Países","Escalafón", ...months, "Total pedidos","Meses activos"];
     const rows = [header];
-    list.forEach(u => rows.push([u.email,u.nombre,u.telefono,(u.paises||[]).join('|'), ...months.map(m=>u.ped_mes[m]||0), u.total_pedidos, u.n_meses_activos]));
+    list.forEach(u => rows.push([u.email,u.nombre,u.telefono,(u.paises||[]).join('|'),u.nivel, ...months.map(m=>u.ped_mes[m]||0), u.total_pedidos, u.n_meses_activos]));
     downloadCSV("dropi_sin_ghl.csv", rows);
   };
 }
