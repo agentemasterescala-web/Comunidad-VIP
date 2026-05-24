@@ -1236,6 +1236,8 @@ function renderClasificacion(limit) {
                           || (b.total_pedidos - a.total_pedidos));
   } else if (sortCol === 'total') {
     filtered.sort((a,b)=> dir*((b.total_pedidos||0) - (a.total_pedidos||0)));
+  } else if (sortCol === 'suma_top3') {
+    filtered.sort((a,b)=> dir*((b.suma_top3||0) - (a.suma_top3||0)));
   } else if (sortCol === 'pct_dev') {
     filtered.sort((a,b)=> dir*((b.pct_dev||0) - (a.pct_dev||0)));
   } else {
@@ -1312,6 +1314,7 @@ function renderClasificacion(limit) {
               <th class="text-left">Países</th>
               ${monthCols}
               <th data-sort="total" class="text-right cursor-pointer hover:text-cyan-300 select-none">Total${sortArrow('total')}</th>
+              <th data-sort="suma_top3" class="text-right cursor-pointer hover:text-cyan-300 select-none" title="Suma de los 3 mejores meses — número que define el escalafón">Top-3${sortArrow('suma_top3')}</th>
               <th data-sort="pct_dev" class="text-right cursor-pointer hover:text-cyan-300 select-none">% Dev.${sortArrow('pct_dev')}</th>
               <th class="text-center">Semáforo</th>
             </tr>
@@ -1326,6 +1329,7 @@ function renderClasificacion(limit) {
                 <td class="text-[14px]">${u.sin_tienda?'<span class="pill bg-red-500/20 text-red-300 border-red-500/40 text-[10px]">⚠ Sin tienda</span>':((u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—')}</td>
                 ${DATA.meta.ventana.map(m => `<td class="text-right font-mono text-slate-400">${fmt(u.ped_mes[m])}</td>`).join('')}
                 <td class="text-right font-mono font-semibold text-slate-100">${fmt(u.total_pedidos)}</td>
+                <td class="text-right font-mono font-semibold text-cyan-300" title="Suma de los 3 mejores meses (define el escalafón)">${fmt(u.suma_top3)}</td>
                 <td class="text-right font-mono ${u.pct_dev>15?'text-orange-400':u.pct_dev>10?'text-yellow-400':'text-slate-400'}">${u.pct_dev}%</td>
                 <td class="text-center"><span class="inline-flex items-center gap-1.5"><span class="w-2 h-2 rounded-full ${semColor[u.semaforo]||'bg-slate-600'}"></span><span class="text-[10px] ${semText[u.semaforo]||'text-slate-500'} font-semibold">${semLabel[u.semaforo]||'—'}</span></span></td>
               </tr>
