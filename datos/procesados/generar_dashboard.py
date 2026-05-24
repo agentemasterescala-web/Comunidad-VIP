@@ -491,6 +491,7 @@ def compute_all():
     # Vista 2: clasificación de TODOS los contactos GHL por programa
     met_sin_vip = []
     met_programas = []
+    met_estudiantes = []   # estudiantes (tag Escala/Iniciación) + sus pedidos Dropi
     cnt_master = 0
     cnt_iniciacion = 0
     cnt_ambos = 0
@@ -521,6 +522,34 @@ def compute_all():
         # Vista 1 solo los que tienen programa pero NO tienen VIP new
         if (has_m or has_i) and not has_vip:
             met_sin_vip.append(item)
+        # Vista "Estudiantes": cualquiera con programa formativo (Escala/Iniciación/Ambos),
+        # enriquecido con sus pedidos de Dropi (vía tiendas cruzadas con el maestro).
+        if has_m or has_i:
+            tiendas_e = extract_tiendas(c)
+            ped_mes_e = {mo: 0 for mo in months}
+            paises_e = []
+            for t in tiendas_e:
+                if t["pais"]:
+                    paises_e.append(t["pais"])
+                for mr in maestro.get(t["email"], []):
+                    if mr["mes"] in ped_mes_e:
+                        ped_mes_e[mr["mes"]] += mr["pedidos"]
+            total_ped_e = sum(ped_mes_e.values())
+            met_estudiantes.append({
+                "cid": c["id"],
+                "nombre": c.get("contactName") or "",
+                "email": (c.get("email") or "").lower(),
+                "telefono": c.get("phone") or "",
+                "programa": prog,
+                "tiene_vip_new": has_vip,
+                "paises": paises_e,
+                "n_tiendas": len(tiendas_e),
+                "ped_mes": ped_mes_e,
+                "total_pedidos": total_ped_e,
+                "tiene_ventas": total_ped_e > 0,
+                "nivel": clasificar_nivel(ped_mes_e.values()),
+            })
+    met_estudiantes.sort(key=lambda x: -x["total_pedidos"])
 
     # Vista 3: emails Dropi que NO están en GHL
     met_dropi_sin_ghl = []
@@ -664,6 +693,11 @@ def compute_all():
             "dropi_sin_ghl_sin_ventas": sum(1 for x in met_dropi_sin_ghl if not x["tiene_ventas"]),
             "sin_comunidad_vip": met_sin_vip,
             "programas": met_programas,
+            "estudiantes": met_estudiantes,
+            "estudiantes_total": len(met_estudiantes),
+            "estudiantes_vip": sum(1 for x in met_estudiantes if x["tiene_vip_new"]),
+            "estudiantes_no_vip": sum(1 for x in met_estudiantes if not x["tiene_vip_new"]),
+            "estudiantes_con_ventas": sum(1 for x in met_estudiantes if x["tiene_ventas"]),
             "dropi_sin_ghl": met_dropi_sin_ghl,
             "duplicados": met_duplicados,
             "duplicados_total": len(met_duplicados),
@@ -832,6 +866,7 @@ const TABS_BY_CAT = {
   "metricas": [
     {id:"met_sin_vip",     label:"👥 No están en Comunidad VIP"},
     {id:"met_programas",   label:"📊 Master vs Iniciación"},
+    {id:"estudiantes",     label:"🎓 Estudiantes"},
     {id:"met_dropi_ghl",   label:"👻 En Dropi sin GHL"},
     {id:"met_duplicados",  label:"🔁 Posibles duplicados"},
   ],
@@ -1536,6 +1571,7 @@ function render() {
     case "consulta":main.innerHTML = renderConsulta(); wireConsulta(); break;
     case "met_sin_vip":    main.innerHTML = renderMetSinVIP();     wireMetSinVIP();     break;
     case "met_programas":  main.innerHTML = renderMetProgramas();   wireMetProgramas();   break;
+    case "estudiantes":    main.innerHTML = renderEstudiantes();    wireEstudiantes();    break;
     case "met_dropi_ghl":  main.innerHTML = renderMetDropiGHL();    wireMetDropiGHL();    break;
     case "met_duplicados": main.innerHTML = renderMetDuplicados();  wireMetDuplicados();  break;
   }
@@ -1551,6 +1587,11 @@ let metProgSearch   = "";
 let metDropiVentas  = "Todos";   // "Todos" | "Con ventas" | "Sin ventas"
 let metDropiSearch  = "";
 let metDropiCountry = "Todos";
+// --- Estudiantes ---
+let estSubtab  = "vip";       // "vip" | "no_vip"
+let estProg    = "Todos";     // "Todos" | "Master Escala" | "Iniciación Escala" | "Ambos"
+let estVentas  = "Todos";     // "Todos" | "Con ventas" | "Sin ventas"
+let estSearch  = "";
 
 function downloadCSV(filename, rows) {
   const NL = String.fromCharCode(10);
@@ -2006,6 +2047,135 @@ function wireMetProgramas() {
     const rows = [["Nombre","Email","Teléfono","Programa","Tiene VIP new","Contact ID"]];
     list.forEach(u => rows.push([u.nombre,u.email,u.telefono,u.programa,u.tiene_vip_new?"Sí":"No",u.cid]));
     downloadCSV("master_vs_iniciacion.csv", rows);
+  };
+}
+
+// ---------- VISTA: Estudiantes (Escala/Iniciación + ventas Dropi) ----------
+function renderEstudiantes() {
+  const all = DATA.metricas.estudiantes || [];
+  const m = DATA.metricas;
+  const months = DATA.meta.ventana;
+  // Subtab: VIP vs no-VIP
+  let base = all.filter(u => estSubtab === "vip" ? u.tiene_vip_new : !u.tiene_vip_new);
+  let list = base.slice();
+  if (estProg !== "Todos")   list = list.filter(u => u.programa === estProg);
+  if (estVentas === "Con ventas") list = list.filter(u => u.tiene_ventas);
+  else if (estVentas === "Sin ventas") list = list.filter(u => !u.tiene_ventas);
+  if (estSearch) {
+    const s = estSearch.toLowerCase();
+    list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s) || (u.telefono||'').includes(s));
+  }
+  const monthCols = months.map(m2 => `<th class="text-right text-[10px] uppercase tracking-wider">${mesShort(m2)}</th>`).join('');
+  // Conteos por programa dentro del subtab activo
+  const progCnt = {
+    "Todos": base.length,
+    "Master Escala": base.filter(u=>u.programa==="Master Escala").length,
+    "Iniciación Escala": base.filter(u=>u.programa==="Iniciación Escala").length,
+    "Ambos": base.filter(u=>u.programa==="Ambos").length,
+  };
+  const conVentasBase = base.filter(u=>u.tiene_ventas).length;
+  const ventasCnt = { "Todos": base.length, "Con ventas": conVentasBase, "Sin ventas": base.length - conVentasBase };
+  return `
+    <div class="card p-4 mb-4">
+      <h2 class="text-base font-bold neon-cyan mb-1">🎓 Estudiantes</h2>
+      <div class="text-xs text-slate-500">Contactos con programa formativo (Escala / Iniciación) y sus pedidos de Dropi en la ventana. Separados según tengan o no la etiqueta <span class="text-cyan-400">Comunidad VIP</span>.</div>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      ${statCard("🎓 Total estudiantes", m.estudiantes_total, "Con tag Escala o Iniciación", "neon-violet")}
+      ${statCard("🏆 En Comunidad VIP", m.estudiantes_vip, "Estudiantes con etiqueta VIP", "neon-green")}
+      ${statCard("🚫 Sin VIP", m.estudiantes_no_vip, "Estudiantes sin etiqueta VIP", "neon-red")}
+      ${statCard("💰 Con ventas Dropi", m.estudiantes_con_ventas, "Estudiantes con ≥1 pedido", "neon-yellow")}
+    </div>
+
+    <div class="card p-4 mb-4">
+      <div class="flex flex-wrap items-center gap-2 mb-3">
+        <button data-estsub="vip" class="text-xs px-4 py-2 rounded-lg font-semibold ${estSubtab==='vip'?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">🏆 En Comunidad VIP <span class="ml-1 text-slate-500">${m.estudiantes_vip}</span></button>
+        <button data-estsub="no_vip" class="text-xs px-4 py-2 rounded-lg font-semibold ${estSubtab==='no_vip'?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">🚫 Sin etiqueta VIP <span class="ml-1 text-slate-500">${m.estudiantes_no_vip}</span></button>
+      </div>
+      <div class="flex flex-wrap items-center gap-3 mb-3">
+        <input id="est-search" type="text" placeholder="Buscar por nombre, email o teléfono..."
+               class="flex-1 min-w-[260px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
+               value="${estSearch.replace(/"/g,'&quot;')}">
+        <button id="est-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ Descargar CSV</button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Programa:</div>
+        ${["Todos","Master Escala","Iniciación Escala","Ambos"].map(p =>
+          `<button data-estprog="${p}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${estProg===p?'bg-violet-600/30 text-violet-200 border border-violet-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${p==='Todos'?'Todos':(PROG_SHORT[p]||p)} <span class="ml-1 text-slate-500">${progCnt[p]||0}</span></button>`
+        ).join('')}
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Ventas:</div>
+        ${["Todos","Con ventas","Sin ventas"].map(f =>
+          `<button data-estventas="${f}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${estVentas===f?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${f} <span class="ml-1 text-slate-500">${ventasCnt[f]||0}</span></button>`
+        ).join('')}
+      </div>
+    </div>
+
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 mb-2">Mostrando ${list.length} de ${base.length} ${estSubtab==='vip'?'(con etiqueta VIP)':'(sin etiqueta VIP)'}</div>
+      <div class="overflow-x-auto scrollable">
+        <table class="w-full text-xs">
+          <thead class="text-[10px] text-slate-500 uppercase tracking-wider border-b border-white/10 sticky top-0 bg-[#06091a] z-10">
+            <tr>
+              <th class="text-left py-2">Nombre</th>
+              <th class="text-left">Email</th>
+              <th class="text-left">Teléfono</th>
+              <th class="text-center">Programa</th>
+              <th class="text-left">Países</th>
+              <th class="text-center">Escalafón</th>
+              ${monthCols}
+              <th class="text-right">Total ped.</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.slice(0,1500).map(u => `
+              <tr class="hover-row border-b border-white/5">
+                <td class="py-2 text-slate-200">${tc(u.nombre)||'—'}</td>
+                <td class="text-slate-300">${u.email||'—'}</td>
+                <td class="text-slate-400 font-mono">${u.telefono||'—'}</td>
+                <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[u.programa]||u.programa}</span></td>
+                <td class="text-[14px]">${(u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—'}</td>
+                <td class="text-center"><span class="pill ${tierColor[u.nivel]}">${u.nivel==='Sin clasificar'?'Sin nivel':u.nivel}</span></td>
+                ${months.map(m2 => `<td class="text-right font-mono ${(u.ped_mes[m2]||0)===0?'text-slate-700':'text-slate-400'}">${fmt(u.ped_mes[m2])}</td>`).join('')}
+                <td class="text-right font-mono font-semibold ${u.total_pedidos>0?'text-slate-100':'text-slate-600'}">${fmt(u.total_pedidos)}</td>
+              </tr>
+            `).join('')}
+            ${list.length>1500?`<tr><td colspan="${6+months.length+1}" class="text-center text-slate-500 py-3">... y ${list.length-1500} más (usa CSV para ver todos)</td></tr>`:''}
+            ${list.length===0?`<tr><td colspan="${6+months.length+1}" class="text-center text-slate-500 py-6">— sin resultados —</td></tr>`:''}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+function wireEstudiantes() {
+  document.querySelectorAll('[data-estsub]').forEach(b => b.onclick = () => { estSubtab = b.dataset.estsub; render(); });
+  document.querySelectorAll('[data-estprog]').forEach(b => b.onclick = () => { estProg = b.dataset.estprog; render(); });
+  document.querySelectorAll('[data-estventas]').forEach(b => b.onclick = () => { estVentas = b.dataset.estventas; render(); });
+  const inp = document.getElementById('est-search');
+  if (inp) {
+    inp.oninput = e => { estSearch = e.target.value; render(); };
+    inp.focus(); inp.setSelectionRange(estSearch.length, estSearch.length);
+  }
+  const btn = document.getElementById('est-csv');
+  if (btn) btn.onclick = () => {
+    const all = DATA.metricas.estudiantes || [];
+    const months = DATA.meta.ventana;
+    let base = all.filter(u => estSubtab === "vip" ? u.tiene_vip_new : !u.tiene_vip_new);
+    let list = base.slice();
+    if (estProg !== "Todos") list = list.filter(u => u.programa === estProg);
+    if (estVentas === "Con ventas") list = list.filter(u => u.tiene_ventas);
+    else if (estVentas === "Sin ventas") list = list.filter(u => !u.tiene_ventas);
+    if (estSearch) {
+      const s = estSearch.toLowerCase();
+      list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s) || (u.telefono||'').includes(s));
+    }
+    const header = ["Nombre","Email","Teléfono","Programa","VIP","Países","Escalafón", ...months, "Total pedidos"];
+    const rows = [header];
+    list.forEach(u => rows.push([u.nombre,u.email,u.telefono,u.programa,u.tiene_vip_new?"Sí":"No",(u.paises||[]).join('|'),u.nivel, ...months.map(mo=>u.ped_mes[mo]||0), u.total_pedidos]));
+    downloadCSV(`estudiantes_${estSubtab}.csv`, rows);
   };
 }
 
