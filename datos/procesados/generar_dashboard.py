@@ -227,13 +227,30 @@ def clasificar_nivel(ped_values):
 
 
 VIP_TAG = "comunidad vip new"
+SINFORM_TAG = "vip sin form"
+
+def audiencias_de(tags_lower):
+    """Devuelve la lista de audiencias a las que pertenece un contacto, según
+    sus tags. Categorías SaaS del dashboard."""
+    has_vip = VIP_TAG in tags_lower
+    has_sf  = SINFORM_TAG in tags_lower
+    has_m   = TAG_MASTER in tags_lower
+    has_i   = TAG_INICIACION in tags_lower
+    aud = []
+    if has_vip: aud.append("vip")
+    if has_m or has_i: aud.append("estudiantes")
+    if has_sf: aud.append("pendientes")
+    if has_vip or has_sf: aud.append("todos_vip")   # "Todos VIP" = new o sin form
+    return aud
 
 def compute_all():
     all_contacts = json.load(open(RAW))
-    # Filtrar SOLO los contactos que tienen el tag "comunidad vip new"
-    contacts = [c for c in all_contacts if VIP_TAG in [t.lower() for t in (c.get("tags") or [])]]
+    # Universo de trabajo: cualquier contacto que pertenezca a alguna audiencia
+    # del dashboard (VIP new, Estudiantes escala/iniciación, o VIP sin form).
+    def _auds(c): return audiencias_de([t.lower() for t in (c.get("tags") or [])])
+    contacts = [c for c in all_contacts if _auds(c)]
     excluidos = len(all_contacts) - len(contacts)
-    print(f"Contactos GHL totales: {len(all_contacts)}  ·  Filtrados por '{VIP_TAG}': {len(contacts)}  ·  Excluidos: {excluidos}")
+    print(f"Contactos GHL totales: {len(all_contacts)}  ·  En alguna audiencia: {len(contacts)}  ·  Excluidos: {excluidos}")
     maestro, months = load_maestro_window()
 
     # Fuentes
@@ -306,7 +323,9 @@ def compute_all():
         dev_mes = {m: 0 for m in months}
         paises_lista = []   # una entrada por cada tienda (puede repetirse país si tiene varios correos en el mismo país)
         paises_set = set()  # para flag "multi-país" (países únicos)
+        tienda_emails = set()
         for t in tiendas:
+            tienda_emails.add(t["email"])
             if t["pais"]:
                 paises_lista.append(t["pais"])
                 paises_set.add(t["pais"])
@@ -315,6 +334,19 @@ def compute_all():
                     ped_mes[mr["mes"]] += mr["pedidos"]
                     ent_mes[mr["mes"]] += mr["entregados"]
                     dev_mes[mr["mes"]] += mr["devoluciones"]
+        # También las ventas asociadas al EMAIL PRINCIPAL si está en el maestro
+        # (caso VIP SIN FORM: vendedores creados sin tiendas, su email vende en Dropi).
+        em_principal = (c.get("email") or "").strip().lower()
+        if em_principal and em_principal not in tienda_emails and em_principal in maestro:
+            for mr in maestro.get(em_principal, []):
+                if mr["mes"] in ped_mes:
+                    ped_mes[mr["mes"]] += mr["pedidos"]
+                    ent_mes[mr["mes"]] += mr["entregados"]
+                    dev_mes[mr["mes"]] += mr["devoluciones"]
+                if mr.get("pais") and mr["pais"] not in paises_set:
+                    paises_lista.append(mr["pais"]); paises_set.add(mr["pais"])
+            if maestro.get(em_principal):
+                sin_tienda = False   # tiene ventas vía email principal
         pedidos_vip_total += sum(ped_mes.values())
         active = sum(1 for v in ped_mes.values() if v > 0)
         sv = sorted(ped_mes.values(), reverse=True)
@@ -407,6 +439,8 @@ def compute_all():
             "sin_tienda": sin_tienda,
             "alerta_tipo": alerta_tipo,
             "es_critica": es_critica,
+            # Audiencias SaaS: ["vip","estudiantes","pendientes","todos_vip"]
+            "aud": audiencias_de([t.lower() for t in (c.get("tags") or [])]),
         })
 
     # Programa formativo (derivado de tags)
@@ -865,27 +899,75 @@ actualizarFrescura();
 setInterval(actualizarFrescura, 10000);
 
 const CATEGORIES = [
-  {id:"vip",      label:"🏆 VIP"},
-  {id:"metricas", label:"📈 Métricas"},
+  {id:"vip",         label:"🏆 VIP"},
+  {id:"estudiantes", label:"🎓 Estudiantes"},
+  {id:"pendientes",  label:"📝 Pendientes por formulario"},
+  {id:"todos_vip",   label:"⭐ Todos VIP"},
+  {id:"otros",       label:"📦 Otros"},
+  {id:"config",      label:"⚙️ Configuración"},
+];
+// Las 4 audiencias comparten los mismos 3 sub-dashboards (resumen/clasif/alertas),
+// que se calculan sobre el subconjunto de usuarios de la categoría activa.
+const _AUD_TABS = [
+  {id:"resumen", label:"📊 Resumen"},
+  {id:"clasif",  label:"🏆 Clasificación"},
+  {id:"alertas", label:"⚠ Alertas"},
 ];
 const TABS_BY_CAT = {
-  "vip": [
-    {id:"resumen", label:"📊 Resumen"},
-    {id:"clasif",  label:"🏆 Clasificación VIP"},
-    {id:"top100",  label:"🔥 Top 100"},
-    {id:"alertas", label:"⚠ Alertas"},
-    {id:"paises",  label:"🌎 Reportes País"},
-    {id:"reglas",  label:"📋 Reglas VIP"},
-    {id:"consulta",label:"🔎 Consulta"},
+  "vip":         _AUD_TABS,
+  "estudiantes": [..._AUD_TABS, {id:"met_programas", label:"📊 Master vs Iniciación"}],
+  "pendientes":  _AUD_TABS,
+  "todos_vip":   _AUD_TABS,
+  "otros": [
+    {id:"otros_resumen",  label:"📊 Resumen"},
+    {id:"met_dropi_ghl",  label:"👻 Lista (Dropi sin GHL)"},
+    {id:"met_duplicados", label:"🔁 Posibles duplicados"},
   ],
-  "metricas": [
-    {id:"met_sin_vip",     label:"👥 No están en Comunidad VIP"},
-    {id:"met_programas",   label:"📊 Master vs Iniciación"},
-    {id:"estudiantes",     label:"🎓 Estudiantes"},
-    {id:"met_dropi_ghl",   label:"👻 En Dropi sin GHL"},
-    {id:"met_duplicados",  label:"🔁 Posibles duplicados"},
+  "config": [
+    {id:"reglas",   label:"📋 Reglas VIP"},
+    {id:"consulta", label:"🔎 Consulta individual"},
   ],
 };
+// Audiencias que usan los sub-dashboards genéricos (id de categoría == flag aud)
+const AUDIENCE_CATS = ["vip","estudiantes","pendientes","todos_vip"];
+function baseUsers() {
+  // Usuarios de la categoría/audiencia activa. Para 'otros'/'config' no aplica.
+  if (AUDIENCE_CATS.includes(currentCategory))
+    return (DATA.usuarios || []).filter(u => (u.aud||[]).includes(currentCategory));
+  return DATA.usuarios || [];
+}
+function computeStats(users) {
+  const months = DATA.meta.ventana;
+  const dist = {}; TIER_ORDER.forEach(t => dist[t] = {n:0, pedidos:0});
+  let verde=0, amarillo=0, rojo=0, sinact=0;
+  let master=0, iniciacion=0, ambos=0, sinprog=0;
+  let clasif=0, activos2=0, desap=0, recup=0, multipais=0, totalPed=0;
+  const ppm={}, apm={}; months.forEach(m=>{ppm[m]=0; apm[m]=0;});
+  const LATEST=months[months.length-1], PREV=months.length>1?months[months.length-2]:null;
+  users.forEach(u => {
+    if (dist[u.nivel]) { dist[u.nivel].n++; dist[u.nivel].pedidos += (u.total_pedidos||0); }
+    if (u.nivel !== 'Sin clasificar') clasif++;
+    const sm=u.semaforo;
+    if (sm==='verde') verde++; else if (sm==='amarillo'||sm==='naranja') amarillo++;
+    else if (sm==='rojo') rojo++; else sinact++;
+    const pr=u.programa;
+    if (pr==='Master Escala') master++; else if (pr==='Iniciación Escala') iniciacion++;
+    else if (pr==='Ambos') ambos++; else sinprog++;
+    if ((u.paises_unicos||[]).length>1) multipais++;
+    totalPed += (u.total_pedidos||0);
+    months.forEach(m => { const v=(u.ped_mes&&u.ped_mes[m])||0; ppm[m]+=v; if(v>0) apm[m]++; });
+    const recent=months.slice(-2);
+    if (recent.some(m => (u.ped_mes&&u.ped_mes[m]>0))) activos2++;
+    if (months.length>2) { const before=months.slice(0,-2);
+      if (before.some(m=>u.ped_mes[m]>0) && recent.every(m=>!(u.ped_mes[m]>0))) desap++; }
+    if (PREV && !(u.ped_mes[PREV]>0) && (u.ped_mes[LATEST]>0)) recup++;
+  });
+  return {dist, total:users.length, clasificados:clasif, total_pedidos:totalPed,
+          semaforo:{verde, amarillo, rojo, sin_actividad:sinact},
+          programa:{master, iniciacion, ambos, sin_programa:sinprog},
+          activos_2_meses:activos2, desaparecidos:desap, recuperados:recup, multi_pais:multipais,
+          pedidos_por_mes:ppm, activos_por_mes:apm};
+}
 // --- Persistencia de estado (sobrevive al auto-refresh cada 60s) ---
 const STATE_KEY = "dashboard_vip_state_v1";
 function loadState() {
@@ -958,20 +1040,26 @@ function statCard(label, n, sub, accentClass) {
   </div>`;
 }
 
+const CAT_LABEL = {vip:"🏆 VIP", estudiantes:"🎓 Estudiantes", pendientes:"📝 Pendientes por formulario", todos_vip:"⭐ Todos VIP"};
 function renderResumen() {
-  const s = DATA.stats;
-  const p = DATA.programa;
+  const users = baseUsers();
+  const s = computeStats(users);
+  const p = s.programa;
   const ventanaTxt = DATA.meta.ventana_labels.length > 1
     ? `${DATA.meta.ventana_labels[0]} → ${DATA.meta.ventana_labels[DATA.meta.ventana_labels.length-1]}`
     : DATA.meta.ventana_labels[0];
   return `
+    <div class="card p-4 mb-4">
+      <h2 class="text-base font-bold neon-cyan mb-1">${CAT_LABEL[currentCategory]||""} · Resumen</h2>
+      <div class="text-xs text-slate-500">${fmt(s.total)} contactos en esta categoría · ventana ${ventanaTxt}</div>
+    </div>
     <!-- ROW 1 -->
     <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-      ${statCard("Usuarios totales", s.usuarios_totales, `${fmt(DATA.fuentes.contactos_con_tienda)} con tienda registrada`, "neon-cyan")}
-      ${statCard("Clasificados VIP", s.clasificados_vip, "Bronce · Plata · Oro · Platino · Diamante", "neon-yellow")}
-      ${statCard("Total pedidos", s.total_pedidos, `Acumulado comunidad completa · ${ventanaTxt}`, "neon-green")}
-      ${statCard("Multi-país", s.multi_pais, "Con tiendas en +1 país", "neon-pink")}
-      ${statCard("Sin alertas", s.sin_alertas, "Clasificados y no en riesgo", "neon-green")}
+      ${statCard("Usuarios totales", s.total, "En esta categoría", "neon-cyan")}
+      ${statCard("Clasificados", s.clasificados, "Bronce · Plata · Oro · Platino · Diamante", "neon-yellow")}
+      ${statCard("Total pedidos", s.total_pedidos, `Acumulado · ${ventanaTxt}`, "neon-green")}
+      ${statCard("Multi-país", s.multi_pais, "Con ventas en +1 país", "neon-pink")}
+      ${statCard("Sin alertas", s.semaforo.verde, "Clasificados y no en riesgo", "neon-green")}
       ${statCard("Activos últimos 2 meses", s.activos_2_meses, "Con pedidos recientes", "neon-blue")}
     </div>
 
@@ -979,7 +1067,7 @@ function renderResumen() {
     <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mt-3">
       ${statCard("Desaparecidos", s.desaparecidos, "Activos antes, 0 los últimos 2 meses", "neon-red")}
       ${statCard("Recuperados", s.recuperados, "Estaban inactivos, vendieron en " + DATA.meta.ultimo_mes_label, "neon-violet")}
-      ${statCard("En riesgo de salir", DATA.semaforo.amarillo, "3 meses consecutivos sin vender", "neon-orange")}
+      ${statCard("En riesgo de salir", s.semaforo.amarillo, "3 meses consecutivos sin vender", "neon-orange")}
     </div>
 
     <!-- PROGRAMA FORMATIVO -->
@@ -1025,7 +1113,7 @@ function renderResumen() {
 }
 
 function renderDistRows() {
-  const d = DATA.distribucion;
+  const d = computeStats(baseUsers()).dist;
   const total = Object.values(d).reduce((s,x)=>s+x.n,0);
   const maxN = Math.max(...Object.values(d).map(x=>x.n)) || 1;
   return TIER_ORDER.map(t => {
@@ -1062,7 +1150,7 @@ const MES_ABBR = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","N
 function mesShort(yyyymm) { const [y,m]=yyyymm.split('-'); return MES_ABBR[+m-1]+' '+y; }
 
 function renderClasificacion(limit) {
-  const users = DATA.usuarios;
+  const users = baseUsers();
 
   // SCOPE = todos los filtros aplicados EXCEPTO el tier (para que los stats por tier sean reactivos)
   let scope = users;
@@ -1319,7 +1407,7 @@ function wireTop100() {
 let alertaFiltroTipo = "Todas", alertaFiltroProg = "Todos", alertaSearch = "";
 
 function renderAlertas() {
-  const users = DATA.usuarios;
+  const users = baseUsers();
   const months = DATA.meta.ventana;
 
   // Counts globales
@@ -1577,19 +1665,55 @@ function renderConsulta() {
 function render() {
   const main = document.getElementById("main-content");
   switch (currentTab) {
+    // Audiencias (VIP / Estudiantes / Pendientes / Todos VIP) — genéricos
     case "resumen": main.innerHTML = renderResumen(); drawCharts(); break;
     case "clasif":  main.innerHTML = renderClasificacion(0); wireClasificacion(); break;
-    case "top100":  main.innerHTML = renderTop100(); wireTop100(); break;
     case "alertas": main.innerHTML = renderAlertas(); wireAlertas(); break;
-    case "paises":  main.innerHTML = renderPaises(); break;
-    case "reglas":  main.innerHTML = renderReglas(); break;
-    case "consulta":main.innerHTML = renderConsulta(); wireConsulta(); break;
-    case "met_sin_vip":    main.innerHTML = renderMetSinVIP();     wireMetSinVIP();     break;
+    // Estudiantes extra
     case "met_programas":  main.innerHTML = renderMetProgramas();   wireMetProgramas();   break;
-    case "estudiantes":    main.innerHTML = renderEstudiantes();    wireEstudiantes();    break;
+    // Otros
+    case "otros_resumen":  main.innerHTML = renderOtrosResumen();   break;
     case "met_dropi_ghl":  main.innerHTML = renderMetDropiGHL();    wireMetDropiGHL();    break;
     case "met_duplicados": main.innerHTML = renderMetDuplicados();  wireMetDuplicados();  break;
+    // Configuración
+    case "reglas":  main.innerHTML = renderReglas(); break;
+    case "consulta":main.innerHTML = renderConsulta(); wireConsulta(); break;
   }
+}
+
+function renderOtrosResumen() {
+  const all = DATA.metricas.dropi_sin_ghl || [];
+  const m = DATA.metricas;
+  const dist = {}; TIER_ORDER.forEach(t => dist[t] = 0);
+  let totalPed = 0;
+  all.forEach(u => { if (dist[u.nivel] !== undefined) dist[u.nivel]++; totalPed += (u.total_pedidos||0); });
+  const maxN = Math.max(...Object.values(dist), 1);
+  return `
+    <div class="card p-4 mb-4">
+      <h2 class="text-base font-bold neon-cyan mb-1">📦 Otros · En Dropi pero NO en GHL</h2>
+      <div class="text-xs text-slate-500">Correos que Dropi reporta pero que no se crearon en GHL (ni por email ni por teléfono). Tienen ventas pero no contacto propio.</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      ${statCard("Total Otros", all.length, `de ${fmt(m.dropi_emails_total)} correos en Dropi`, "neon-cyan")}
+      ${statCard("Con ventas", m.dropi_sin_ghl_con_ventas, "Tienen ≥1 pedido en la ventana", "neon-green")}
+      ${statCard("Sin ventas", m.dropi_sin_ghl_sin_ventas, "0 pedidos en la ventana", "neon-red")}
+      ${statCard("Total pedidos", totalPed, "Acumulado de este grupo", "neon-yellow")}
+    </div>
+    <div class="card p-5">
+      <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Escalafón calculado (desde ventas Dropi)</h3>
+      <table class="w-full text-sm"><tbody>
+        ${TIER_ORDER.map(t => {
+          const n = dist[t]; const bw = (n/maxN*100).toFixed(1); const c = TIER_COLORS_HEX[t];
+          return `<tr class="border-b border-white/5">
+            <td class="py-2"><span class="pill ${tierColor[t]}">${t}</span></td>
+            <td class="text-right font-mono text-slate-200">${n}</td>
+            <td class="pl-6 pr-2 w-3/5"><div class="bg-white/5 h-2 rounded-full overflow-hidden"><div class="h-full rounded-full" style="width:${bw}%;background:${c}"></div></div></td>
+          </tr>`;
+        }).join('')}
+      </tbody></table>
+      <div class="text-xs text-slate-500 mt-3">Ver el detalle completo en la pestaña <strong>👻 Lista (Dropi sin GHL)</strong>.</div>
+    </div>
+  `;
 }
 
 // ============================================================
@@ -2617,7 +2741,8 @@ function wireConsulta() {
 }
 
 function drawCharts() {
-  const d = DATA.distribucion;
+  const _st = computeStats(baseUsers());
+  const d = _st.dist;
   // 1. Distribución VIP (donut)
   new Chart(document.getElementById("chart-donut"), {
     type: 'doughnut',
@@ -2638,7 +2763,7 @@ function drawCharts() {
     data: {
       labels: ['Verde', 'Amarillo', 'Rojo', 'Sin actividad'],
       datasets: [{
-        data: [DATA.semaforo.verde, DATA.semaforo.amarillo, DATA.semaforo.rojo, DATA.semaforo.sin_actividad],
+        data: [_st.semaforo.verde, _st.semaforo.amarillo, _st.semaforo.rojo, _st.semaforo.sin_actividad],
         backgroundColor: ['#4ade80', '#facc15', '#f87171', '#64748b'],
         borderRadius: 4,
       }]
@@ -2660,7 +2785,7 @@ function drawCharts() {
       labels: months.map(mesShort),
       datasets: [{
         label: 'Pedidos VIP',
-        data: months.map(m => DATA.pedidos_por_mes[m] || 0),
+        data: months.map(m => _st.pedidos_por_mes[m] || 0),
         borderColor: '#818cf8',
         backgroundColor: 'rgba(129,140,248,0.15)',
         borderWidth: 2,
@@ -2685,7 +2810,7 @@ function drawCharts() {
     data: {
       labels: months.map(mesShort),
       datasets: [{
-        data: months.map(m => DATA.activos_por_mes[m] || 0),
+        data: months.map(m => _st.activos_por_mes[m] || 0),
         backgroundColor: '#a5b4fc',
         borderRadius: 4,
       }]
