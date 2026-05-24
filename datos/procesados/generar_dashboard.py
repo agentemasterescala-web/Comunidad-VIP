@@ -3,7 +3,7 @@
 Dashboard del Panel Comunidad VIP — Iván Caicedo.
 Layout tipo panel ejecutivo con tabs, charts y métricas en vivo.
 """
-import os, json, html
+import os, json, html, re
 from datetime import datetime
 from collections import defaultdict, Counter
 import openpyxl
@@ -477,10 +477,19 @@ def compute_all():
     # ============================================================
 
     # Universo total de emails GHL: principal + emails de las 10 tiendas
+    # + sufijos de teléfono (para deduplicar también por teléfono).
+    def _tel_suffix(raw):
+        """Últimos 10 dígitos del teléfono (dedup country-agnostic). '' si <8 díg."""
+        if not raw: return ""
+        d = re.sub(r"\D", "", str(raw))
+        return d[-10:] if len(d) >= 8 else ""
     ghl_emails_set = set()
+    ghl_phone_suffixes = set()
     for c in all_contacts:
         em_p = (c.get("email") or "").strip().lower()
         if em_p: ghl_emails_set.add(em_p)
+        suf_c = _tel_suffix(c.get("phone"))
+        if suf_c: ghl_phone_suffixes.add(suf_c)
         cf_all = {f["id"]: f.get("value") for f in c.get("customFields", [])}
         for fid in TIENDA_IDS:
             v = cf_all.get(fid)
@@ -551,10 +560,17 @@ def compute_all():
             })
     met_estudiantes.sort(key=lambda x: -x["total_pedidos"])
 
-    # Vista 3: emails Dropi que NO están en GHL
+    # Vista 3: emails Dropi que NO están en GHL.
+    # Excluye los que su EMAIL ya está en GHL Y los que su TELÉFONO ya está en GHL
+    # (estos existen en GHL bajo otro email; no son realmente "sin GHL").
     met_dropi_sin_ghl = []
+    excluidos_por_tel = 0
     for em, rows in maestro.items():
         if not em or em.strip().lower() in ghl_emails_set:
+            continue
+        tel_em = next((r.get("telefono") for r in rows if r.get("telefono")), "") or ""
+        if _tel_suffix(tel_em) in ghl_phone_suffixes and _tel_suffix(tel_em):
+            excluidos_por_tel += 1
             continue
         em_low = em.strip().lower()
         total_ped = sum(r["pedidos"] for r in rows)
@@ -564,7 +580,6 @@ def compute_all():
         meses_activos_em = sorted({r["mes"] for r in rows if r.get("pedidos", 0) > 0})
         nombre_raw = next((r.get("nombre") for r in rows if r.get("nombre")), "") or ""
         nombre_em = normalizar_nombre_dropi(nombre_raw)
-        tel_em = next((r.get("telefono") for r in rows if r.get("telefono")), "") or ""
         ped_mes_em = {m: 0 for m in months}
         for r in rows:
             if r["mes"] in ped_mes_em:
