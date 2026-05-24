@@ -1160,7 +1160,7 @@ function renderDistRows() {
   }).join('');
 }
 
-let currentFilter = "Todos", currentSearch = "", currentProg = "Todos", currentCountry = "Todos", currentMultipais = false;
+let currentFilter = "Todos", currentSearch = "", currentProg = "Todos", currentCountry = "Todos", currentMultipais = false, currentVentas = "Todos";
 
 const COUNTRY_FLAG = {
   "Colombia":"🇨🇴","Chile":"🇨🇱","Ecuador":"🇪🇨","México":"🇲🇽","Mexico":"🇲🇽",
@@ -1183,6 +1183,8 @@ function renderClasificacion(limit) {
 
   // SCOPE = todos los filtros aplicados EXCEPTO el tier (para que los stats por tier sean reactivos)
   let scope = users;
+  if (currentVentas === "Con ventas") scope = scope.filter(u => (u.total_pedidos||0) > 0);
+  else if (currentVentas === "Sin ventas") scope = scope.filter(u => (u.total_pedidos||0) === 0);
   if (currentProg !== "Todos") scope = scope.filter(u => u.programa === currentProg);
   if (currentCountry !== "Todos") scope = scope.filter(u => (u.paises_unicos||[]).includes(currentCountry));
   if (currentMultipais) scope = scope.filter(u => (u.paises_unicos||[]).length > 1);
@@ -1190,6 +1192,12 @@ function renderClasificacion(limit) {
     const s = currentSearch.toLowerCase();
     scope = scope.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
   }
+  // counts para los botones del filtro de ventas (sobre la audiencia completa)
+  const ventasCounts = {
+    "Todos": users.length,
+    "Con ventas": users.filter(u => (u.total_pedidos||0) > 0).length,
+    "Sin ventas": users.filter(u => (u.total_pedidos||0) === 0).length,
+  };
 
   const tierCounts = { "Todos": scope.length };
   TIER_ORDER.forEach(t => tierCounts[t] = scope.filter(u=>u.nivel===t).length);
@@ -1237,6 +1245,13 @@ function renderClasificacion(limit) {
         <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Programa:</div>
         ${["Todos",...PROG_ORDER].map(p =>
           `<button data-prog="${p}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${currentProg===p?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${p==='Todos'?'Todos':PROG_SHORT[p]} <span class="ml-1 text-slate-500">${progCounts[p]||0}</span></button>`
+        ).join('')}
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Ventas:</div>
+        ${["Todos","Con ventas","Sin ventas"].map(v =>
+          `<button data-ventas="${v}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${currentVentas===v?'bg-emerald-600/30 text-emerald-200 border border-emerald-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${v} <span class="ml-1 text-slate-500">${ventasCounts[v]||0}</span></button>`
         ).join('')}
       </div>
 
@@ -2173,8 +2188,6 @@ function renderMetProgramas() {
               <th class="text-left">Email</th>
               <th class="text-left">Teléfono</th>
               <th class="text-center">Programa</th>
-              <th class="text-center">VIP new</th>
-              <th class="text-left">Contact ID</th>
             </tr>
           </thead>
           <tbody>
@@ -2184,12 +2197,10 @@ function renderMetProgramas() {
                 <td class="text-slate-300">${u.email||'—'}</td>
                 <td class="text-slate-400 font-mono">${u.telefono||'—'}</td>
                 <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[u.programa]||u.programa}</span></td>
-                <td class="text-center">${u.tiene_vip_new?'<span class="pill bg-green-500/20 text-green-300 border-green-500/40">✓ Sí</span>':'<span class="pill bg-slate-700/40 text-slate-500 border-slate-600/40">— No</span>'}</td>
-                <td class="text-slate-500 font-mono text-[10px]">${u.cid}</td>
               </tr>
             `).join('')}
-            ${list.length>1000?`<tr><td colspan="6" class="text-center text-slate-500 py-3">... y ${list.length-1000} más (usa CSV para ver todos)</td></tr>`:''}
-            ${list.length===0?`<tr><td colspan="6" class="text-center text-slate-500 py-6">— sin resultados —</td></tr>`:''}
+            ${list.length>1000?`<tr><td colspan="4" class="text-center text-slate-500 py-3">... y ${list.length-1000} más (usa CSV para ver todos)</td></tr>`:''}
+            ${list.length===0?`<tr><td colspan="4" class="text-center text-slate-500 py-6">— sin resultados —</td></tr>`:''}
           </tbody>
         </table>
       </div>
@@ -2212,8 +2223,8 @@ function wireMetProgramas() {
       const s = metProgSearch.toLowerCase();
       list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
     }
-    const rows = [["Nombre","Email","Teléfono","Programa","Tiene VIP new","Contact ID"]];
-    list.forEach(u => rows.push([u.nombre,u.email,u.telefono,u.programa,u.tiene_vip_new?"Sí":"No",u.cid]));
+    const rows = [["Nombre","Email","Teléfono","Programa"]];
+    list.forEach(u => rows.push([u.nombre,u.email,u.telefono,u.programa]));
     downloadCSV("master_vs_iniciacion.csv", rows);
   };
 }
@@ -2573,6 +2584,7 @@ function wireMetDropiGHL() {
 function wireClasificacion() {
   document.querySelectorAll('[data-tier]').forEach(b => b.onclick = () => { currentFilter = b.dataset.tier; render(); });
   document.querySelectorAll('[data-prog]').forEach(b => b.onclick = () => { currentProg = b.dataset.prog; render(); });
+  document.querySelectorAll('[data-ventas]').forEach(b => b.onclick = () => { currentVentas = b.dataset.ventas; render(); });
   document.querySelectorAll('[data-multipais]').forEach(b => b.onclick = () => { currentMultipais = !currentMultipais; render(); });
   document.querySelectorAll('[data-cid]').forEach(row => row.onclick = () => abrirFicha(row.dataset.cid));
   const cs = document.getElementById('country-select');
