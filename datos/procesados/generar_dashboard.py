@@ -1168,6 +1168,11 @@ let currentSearch = "", currentCountry = "Todos", currentMultipais = false, curr
 // Multi-selección: Sets vacíos = "Todos". Permiten marcar varios niveles/programas a la vez.
 let currentTiers = new Set();   // ej. {"Oro","Plata","Bronce"}
 let currentProgs = new Set();
+// Ordenamiento de la tabla de Clasificación.
+//   sortCol: "nivel" (default = clasificación primero) | "total" | "pct_dev" | un mes "YYYY-MM"
+//   sortDir: "desc" (mayor→menor) | "asc" (menor→mayor)
+let sortCol = "nivel", sortDir = "desc";
+function sortArrow(col) { return sortCol===col ? (sortDir==='desc'?' ▼':' ▲') : ''; }
 
 const COUNTRY_FLAG = {
   "Colombia":"🇨🇴","Chile":"🇨🇱","Ecuador":"🇪🇨","México":"🇲🇽","Mexico":"🇲🇽",
@@ -1222,12 +1227,24 @@ function renderClasificacion(limit) {
 
   let filtered = scope;
   if (currentTiers.size) filtered = filtered.filter(u => currentTiers.has(u.nivel));
-  // Orden: PRIMERO por escalafón (Diamante→…→Sin nivel), DENTRO de cada nivel por ventas desc.
-  filtered.sort((a,b)=> (TIER_ORDER.indexOf(a.nivel) - TIER_ORDER.indexOf(b.nivel))
-                        || (b.total_pedidos - a.total_pedidos));
+  // Orden configurable por la columna que el usuario clickee.
+  // dir=+1 para desc (mayor→menor), -1 para asc (menor→mayor).
+  const dir = sortDir === 'asc' ? -1 : 1;
+  if (sortCol === 'nivel') {
+    // Escalafón primero (dir invierte Diamante↔Sin nivel); dentro de cada nivel, ventas desc.
+    filtered.sort((a,b)=> dir*(TIER_ORDER.indexOf(a.nivel) - TIER_ORDER.indexOf(b.nivel))
+                          || (b.total_pedidos - a.total_pedidos));
+  } else if (sortCol === 'total') {
+    filtered.sort((a,b)=> dir*((b.total_pedidos||0) - (a.total_pedidos||0)));
+  } else if (sortCol === 'pct_dev') {
+    filtered.sort((a,b)=> dir*((b.pct_dev||0) - (a.pct_dev||0)));
+  } else {
+    // un mes concreto (YYYY-MM): ordenar por pedidos de ese mes
+    filtered.sort((a,b)=> dir*(((b.ped_mes&&b.ped_mes[sortCol])||0) - ((a.ped_mes&&a.ped_mes[sortCol])||0)));
+  }
 
   const allCountries = [...new Set(users.flatMap(u => u.paises_unicos||u.paises||[]))].sort();
-  const monthCols = DATA.meta.ventana.map(m => `<th class="text-right text-[10px] uppercase tracking-wider">${mesShort(m)}</th>`).join('');
+  const monthCols = DATA.meta.ventana.map(m => `<th data-sort="${m}" class="text-right text-[10px] uppercase tracking-wider cursor-pointer hover:text-cyan-300 select-none">${mesShort(m)}${sortArrow(m)}</th>`).join('');
 
   return `
     <!-- BARRA DE FILTROS -->
@@ -1290,12 +1307,12 @@ function renderClasificacion(limit) {
             <tr>
               <th class="text-left py-2">Nombre</th>
               <th class="text-left">Teléfono</th>
-              <th class="text-center">Nivel</th>
+              <th data-sort="nivel" class="text-center cursor-pointer hover:text-cyan-300 select-none">Nivel${sortArrow('nivel')}</th>
               <th class="text-center">Programa</th>
               <th class="text-left">Países</th>
               ${monthCols}
-              <th class="text-right">Total</th>
-              <th class="text-right">% Dev.</th>
+              <th data-sort="total" class="text-right cursor-pointer hover:text-cyan-300 select-none">Total${sortArrow('total')}</th>
+              <th data-sort="pct_dev" class="text-right cursor-pointer hover:text-cyan-300 select-none">% Dev.${sortArrow('pct_dev')}</th>
               <th class="text-center">Semáforo</th>
             </tr>
           </thead>
@@ -2593,6 +2610,12 @@ function wireMetDropiGHL() {
 }
 
 function wireClasificacion() {
+  document.querySelectorAll('th[data-sort]').forEach(th => th.onclick = () => {
+    const col = th.dataset.sort;
+    if (sortCol === col) { sortDir = (sortDir === 'desc' ? 'asc' : 'desc'); }
+    else { sortCol = col; sortDir = 'desc'; }
+    render();
+  });
   document.querySelectorAll('[data-tier]').forEach(b => b.onclick = () => {
     const t = b.dataset.tier;
     if (t === 'Todos') currentTiers.clear();
