@@ -1163,7 +1163,10 @@ function renderDistRows() {
   }).join('');
 }
 
-let currentFilter = "Todos", currentSearch = "", currentProg = "Todos", currentCountry = "Todos", currentMultipais = false, currentVentas = "Todos";
+let currentSearch = "", currentCountry = "Todos", currentMultipais = false, currentVentas = "Todos";
+// Multi-selección: Sets vacíos = "Todos". Permiten marcar varios niveles/programas a la vez.
+let currentTiers = new Set();   // ej. {"Oro","Plata","Bronce"}
+let currentProgs = new Set();
 
 const COUNTRY_FLAG = {
   "Colombia":"🇨🇴","Chile":"🇨🇱","Ecuador":"🇪🇨","México":"🇲🇽","Mexico":"🇲🇽",
@@ -1188,7 +1191,7 @@ function renderClasificacion(limit) {
   let scope = users;
   if (currentVentas === "Con ventas") scope = scope.filter(u => (u.total_pedidos||0) > 0);
   else if (currentVentas === "Sin ventas") scope = scope.filter(u => (u.total_pedidos||0) === 0);
-  if (currentProg !== "Todos") scope = scope.filter(u => u.programa === currentProg);
+  if (currentProgs.size) scope = scope.filter(u => currentProgs.has(u.programa));
   if (currentCountry !== "Todos") scope = scope.filter(u => (u.paises_unicos||[]).includes(currentCountry));
   if (currentMultipais) scope = scope.filter(u => (u.paises_unicos||[]).length > 1);
   if (currentSearch) {
@@ -1217,7 +1220,7 @@ function renderClasificacion(limit) {
   PROG_ORDER.forEach(p => progCounts[p] = scopeNoProg.filter(u => u.programa===p).length);
 
   let filtered = scope;
-  if (currentFilter !== "Todos") filtered = filtered.filter(u => u.nivel === currentFilter);
+  if (currentTiers.size) filtered = filtered.filter(u => currentTiers.has(u.nivel));
   filtered.sort((a,b)=>b.suma_top3 - a.suma_top3);
 
   const allCountries = [...new Set(users.flatMap(u => u.paises_unicos||u.paises||[]))].sort();
@@ -1239,16 +1242,18 @@ function renderClasificacion(limit) {
 
       <div class="flex flex-wrap items-center gap-2 mb-2">
         <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Nivel:</div>
-        ${["Todos",...TIER_ORDER].map(t =>
-          `<button data-tier="${t}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${currentFilter===t?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${t==='Sin clasificar'?'Sin nivel':t} <span class="ml-1 text-slate-500">${tierCounts[t]||0}</span></button>`
-        ).join('')}
+        ${["Todos",...TIER_ORDER].map(t => {
+          const on = t==='Todos' ? currentTiers.size===0 : currentTiers.has(t);
+          return `<button data-tier="${t}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${on?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${t==='Sin clasificar'?'Sin nivel':t} <span class="ml-1 text-slate-500">${tierCounts[t]||0}</span></button>`;
+        }).join('')}
       </div>
 
       <div class="flex flex-wrap items-center gap-2 mb-2">
         <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Programa:</div>
-        ${["Todos",...PROG_ORDER].map(p =>
-          `<button data-prog="${p}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${currentProg===p?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${p==='Todos'?'Todos':PROG_SHORT[p]} <span class="ml-1 text-slate-500">${progCounts[p]||0}</span></button>`
-        ).join('')}
+        ${["Todos",...PROG_ORDER].map(p => {
+          const on = p==='Todos' ? currentProgs.size===0 : currentProgs.has(p);
+          return `<button data-prog="${p}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${on?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${p==='Todos'?'Todos':PROG_SHORT[p]} <span class="ml-1 text-slate-500">${progCounts[p]||0}</span></button>`;
+        }).join('')}
       </div>
 
       <div class="flex flex-wrap items-center gap-2 mb-2">
@@ -2585,8 +2590,18 @@ function wireMetDropiGHL() {
 }
 
 function wireClasificacion() {
-  document.querySelectorAll('[data-tier]').forEach(b => b.onclick = () => { currentFilter = b.dataset.tier; render(); });
-  document.querySelectorAll('[data-prog]').forEach(b => b.onclick = () => { currentProg = b.dataset.prog; render(); });
+  document.querySelectorAll('[data-tier]').forEach(b => b.onclick = () => {
+    const t = b.dataset.tier;
+    if (t === 'Todos') currentTiers.clear();
+    else { currentTiers.has(t) ? currentTiers.delete(t) : currentTiers.add(t); }
+    render();
+  });
+  document.querySelectorAll('[data-prog]').forEach(b => b.onclick = () => {
+    const p = b.dataset.prog;
+    if (p === 'Todos') currentProgs.clear();
+    else { currentProgs.has(p) ? currentProgs.delete(p) : currentProgs.add(p); }
+    render();
+  });
   document.querySelectorAll('[data-ventas]').forEach(b => b.onclick = () => { currentVentas = b.dataset.ventas; render(); });
   document.querySelectorAll('[data-multipais]').forEach(b => b.onclick = () => { currentMultipais = !currentMultipais; render(); });
   document.querySelectorAll('[data-cid]').forEach(row => row.onclick = () => abrirFicha(row.dataset.cid));
