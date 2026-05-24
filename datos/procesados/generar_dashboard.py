@@ -513,10 +513,13 @@ def compute_all():
     # Universo total de emails GHL: principal + emails de las 10 tiendas
     # + sufijos de teléfono (para deduplicar también por teléfono).
     def _tel_suffix(raw):
-        """Últimos 10 dígitos del teléfono (dedup country-agnostic). '' si <8 díg."""
+        """Últimos 8 dígitos del teléfono (número nacional, dedup country-agnostic).
+        Se usan 8 y no 10 porque GHL guarda E.164 (+57..., +56...) y Dropi guarda
+        el número local sin código país; los últimos 8 dígitos (la parte de
+        suscriptor) coinciden entre ambos formatos. '' si <8 díg."""
         if not raw: return ""
         d = re.sub(r"\D", "", str(raw))
-        return d[-10:] if len(d) >= 8 else ""
+        return d[-8:] if len(d) >= 8 else ""
     ghl_emails_set = set()
     ghl_phone_suffixes = set()
     for c in all_contacts:
