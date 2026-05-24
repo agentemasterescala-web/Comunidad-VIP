@@ -20,6 +20,10 @@ datos/procesados/clasificacion_usuarios.xlsx
 datos/procesados/dashboard.html
 datos/procesados/writeback_run.log
 
+# ── Planes/exports con PII (emails, teléfonos, nombres) ────────
+datos/procesados/plan_vip_sin_form.csv
+datos/procesados/*.csv
+
 # ── Logs ───────────────────────────────────────────────────────
 **/logs/
 **/*.log
