@@ -226,8 +226,17 @@ def load_maestro():
 def calc_user(contact, maestro):
     tiendas = extract_tiendas(contact)
     ped_mes = {m: 0 for m in MONTHS}
+    tienda_emails = set()
     for t in tiendas:
+        tienda_emails.add(t["email"])
         for mr in maestro.get(t["email"], []):
+            if mr["mes"] in ped_mes:
+                ped_mes[mr["mes"]] += mr["pedidos"]
+    # Fallback: si las tiendas no tienen data (se está alimentando de a poco),
+    # usar las ventas del CORREO PRINCIPAL si está en el maestro de Dropi.
+    em_principal = (contact.get("email") or "").strip().lower()
+    if em_principal and em_principal not in tienda_emails and em_principal in maestro:
+        for mr in maestro.get(em_principal, []):
             if mr["mes"] in ped_mes:
                 ped_mes[mr["mes"]] += mr["pedidos"]
     active = sum(1 for v in ped_mes.values() if v > 0)
@@ -372,7 +381,10 @@ def main():
         if args.limit and processed >= args.limit:
             break
         tiendas = extract_tiendas(c)
-        if not tiendas:
+        em_p = (c.get("email") or "").strip().lower()
+        # Procesar si tiene tiendas O si su correo principal está en Dropi
+        # (caso tiendas vacías / contactos cargados sin tienda).
+        if not tiendas and em_p not in maestro:
             continue
         calc = calc_user(c, maestro)
         plan = build_updates(c, calc)
