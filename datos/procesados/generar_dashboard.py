@@ -635,7 +635,8 @@ def compute_all():
             # Escalafón calculado con las mismas reglas VIP, aunque no estén en GHL.
             "nivel": clasificar_nivel(ped_mes_em.values()),
         })
-    met_dropi_sin_ghl.sort(key=lambda x: -x["total_pedidos"])
+    # Orden: primero por escalafón (Diamante→…→Sin clasificar), luego por ventas desc.
+    met_dropi_sin_ghl.sort(key=lambda x: (TIER_ORDER.index(x["nivel"]) if x["nivel"] in TIER_ORDER else 99, -x["total_pedidos"]))
 
     # Vista 4: duplicados potenciales
     # Detecta tiendas cuyo correo coincide con el email principal de OTRO contacto.
@@ -1221,7 +1222,9 @@ function renderClasificacion(limit) {
 
   let filtered = scope;
   if (currentTiers.size) filtered = filtered.filter(u => currentTiers.has(u.nivel));
-  filtered.sort((a,b)=>b.suma_top3 - a.suma_top3);
+  // Orden: PRIMERO por escalafón (Diamante→…→Sin nivel), DENTRO de cada nivel por ventas desc.
+  filtered.sort((a,b)=> (TIER_ORDER.indexOf(a.nivel) - TIER_ORDER.indexOf(b.nivel))
+                        || (b.total_pedidos - a.total_pedidos));
 
   const allCountries = [...new Set(users.flatMap(u => u.paises_unicos||u.paises||[]))].sort();
   const monthCols = DATA.meta.ventana.map(m => `<th class="text-right text-[10px] uppercase tracking-wider">${mesShort(m)}</th>`).join('');
