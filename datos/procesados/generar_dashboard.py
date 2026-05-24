@@ -776,6 +776,19 @@ def render_html(data):
              background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.08); }
   .cat-btn:hover { color: #e2e8f0; background: rgba(255,255,255,0.06); }
   .cat-btn.active { color: #ffffff; background: linear-gradient(135deg, rgba(34,211,238,0.25) 0%, rgba(59,130,246,0.25) 100%); border-color: rgba(34,211,238,0.55); box-shadow: 0 0 14px rgba(34,211,238,0.15); }
+  /* Sidebar SaaS */
+  .sidebar { width: 248px; flex-shrink: 0; background: rgba(8,11,26,0.75); border-right: 1px solid rgba(255,255,255,0.06);
+             position: sticky; top: 0; height: 100vh; overflow-y: auto; backdrop-filter: blur(8px); }
+  .side-cat { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 11px 13px;
+              font-size: 13px; font-weight: 600; color: #94a3b8; border-radius: 9px; border: 1px solid transparent;
+              transition: all .15s; cursor: pointer; line-height: 1.2; }
+  .side-cat:hover { color: #e2e8f0; background: rgba(255,255,255,0.06); }
+  .side-cat.active { color: #ffffff; background: linear-gradient(135deg, rgba(34,211,238,0.22) 0%, rgba(59,130,246,0.22) 100%);
+                     border-color: rgba(34,211,238,0.5); box-shadow: 0 0 14px rgba(34,211,238,0.12); }
+  .side-cat .cat-count { margin-left: auto; font-size: 10px; font-weight: 600; color: #64748b;
+                         background: rgba(255,255,255,0.05); padding: 1px 7px; border-radius: 999px; }
+  @media (max-width: 768px) { .sidebar { width: 64px; } .side-cat .cat-text, .side-cat .cat-count { display: none; }
+                              .sidebar .brand-text { display:none; } }
   @keyframes pulse-warn {
     0%, 100% { box-shadow: 0 0 0 0 rgba(248,113,113,0); }
     50%      { box-shadow: 0 0 0 6px rgba(248,113,113,0.25); }
@@ -799,32 +812,36 @@ def render_html(data):
 </head>
 <body class="text-slate-200 min-h-screen font-sans">
 
-<!-- HEADER -->
-<header class="border-b border-white/5 px-6 py-4 flex items-center gap-4">
-  <div class="w-12 h-12 rounded-lg bg-gradient-to-br from-cyan-500/30 to-blue-700/30 border border-cyan-500/30 flex items-center justify-center text-xs font-bold">VIP</div>
-  <div class="flex-1">
-    <h1 class="text-xl font-bold">Panel <span class="neon-cyan">Comunidad VIP</span> — Iván Caicedo</h1>
-    <div class="text-xs text-slate-500" id="header-meta"></div>
-  </div>
-  <button id="btn-refresh" onclick="location.reload()"
-          class="cat-btn flex items-center gap-2"
-          title="Recargar la página para obtener los datos más recientes">
-    🔄 <span>Actualizar</span>
-  </button>
-</header>
+<div class="flex min-h-screen">
+  <!-- SIDEBAR -->
+  <aside class="sidebar flex flex-col">
+    <div class="px-5 py-5 flex items-center gap-3 border-b border-white/5">
+      <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-cyan-500/30 to-blue-700/30 border border-cyan-500/30 flex items-center justify-center text-xs font-bold flex-shrink-0">VIP</div>
+      <div class="brand-text min-w-0">
+        <div class="text-sm font-bold leading-tight truncate">Comunidad <span class="neon-cyan">VIP</span></div>
+        <div class="text-[10px] text-slate-500">Iván Caicedo</div>
+      </div>
+    </div>
+    <nav class="flex-1 p-3 flex flex-col gap-1.5" id="categories"></nav>
+    <div class="p-3 border-t border-white/5">
+      <button id="btn-refresh" onclick="location.reload()"
+              class="cat-btn w-full flex items-center justify-center gap-2"
+              title="Recargar para obtener los datos más recientes">🔄 <span class="cat-text">Actualizar</span></button>
+      <div class="text-[10px] text-slate-600 mt-2 px-1 leading-snug" id="header-meta"></div>
+    </div>
+  </aside>
 
-<!-- CATEGORIES -->
-<nav class="border-b border-white/5 px-6 py-3 flex flex-wrap gap-2" id="categories"></nav>
-
-<!-- TABS -->
-<nav class="border-b border-white/5 px-6 flex flex-wrap gap-1" id="tabs"></nav>
-
-<!-- CONTENT -->
-<main class="p-6 max-w-[1600px] mx-auto" id="main-content"></main>
-
-<footer class="text-center text-xs text-slate-700 py-8">
-  Generado por <code>generar_dashboard.py</code> · datos en vivo de GHL
-</footer>
+  <!-- MAIN COLUMN -->
+  <div class="flex-1 min-w-0 flex flex-col">
+    <!-- TABS -->
+    <nav class="border-b border-white/5 px-6 flex flex-wrap gap-1 bg-[#070b1a]/40 sticky top-0 z-20 backdrop-blur" id="tabs"></nav>
+    <!-- CONTENT -->
+    <main class="p-6 flex-1" id="main-content"></main>
+    <footer class="text-center text-xs text-slate-700 py-8">
+      Generado por <code>generar_dashboard.py</code> · datos en vivo de GHL
+    </footer>
+  </div><!-- /main column -->
+</div><!-- /flex -->
 
 <!-- MODAL FICHA -->
 <div id="ficha-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm overflow-y-auto" onclick="if(event.target===this)cerrarFicha()">
@@ -992,10 +1009,22 @@ let currentTab = (TABS_BY_CAT[currentCategory].some(t => t.id === _wantedTab))
   ? _wantedTab
   : TABS_BY_CAT[currentCategory][0].id;
 
+function catCount(cat) {
+  if (AUDIENCE_CATS.includes(cat)) return (DATA.usuarios||[]).filter(u => (u.aud||[]).includes(cat)).length;
+  if (cat === "otros") return (DATA.metricas.dropi_sin_ghl||[]).length;
+  return null;
+}
 function renderCategories() {
-  document.getElementById("categories").innerHTML = CATEGORIES.map(c =>
-    `<button class="cat-btn ${currentCategory===c.id?'active':''}" data-cat="${c.id}">${c.label}</button>`
-  ).join('');
+  document.getElementById("categories").innerHTML = CATEGORIES.map(c => {
+    const n = catCount(c.id);
+    const parts = c.label.split(" ");
+    const icon = parts[0];
+    const text = parts.slice(1).join(" ");
+    return `<button class="side-cat ${currentCategory===c.id?'active':''}" data-cat="${c.id}">`
+      + `<span class="cat-icon">${icon}</span><span class="cat-text">${text}</span>`
+      + (n!==null?`<span class="cat-count">${fmt(n)}</span>`:``)
+      + `</button>`;
+  }).join('');
   document.querySelectorAll('[data-cat]').forEach(b => b.onclick = () => {
     currentCategory = b.dataset.cat;
     currentTab = TABS_BY_CAT[currentCategory][0].id;
