@@ -38,8 +38,21 @@ echo "════════════════════════�
 
 PY=$(command -v python3 || echo /usr/bin/python3)
 
-echo "▶ consolidar_excel.py"
-$PY consolidar_excel.py >/dev/null || { echo "✗ consolidar falló"; exit 1; }
+# Antes de refrescar/reclasificar, forzamos una corrida FRESCA del agente
+# consolidar (python directo, con acceso a Drive por TCC). Esto evita una race
+# condition: si acaban de subir un mes nuevo a Drive minutos antes de este
+# publish, el maestro puede aún no tenerlo. El kickstart -k mata la corrida
+# anterior y arranca una nueva; esperamos a que termine antes de seguir.
+echo "▶ consolidar (kickstart al agente python directo)"
+launchctl kickstart -k "gui/$(id -u)/com.masterescala.comunidad-vip-consolidar" 2>/dev/null || true
+# Esperar hasta que el agente esté idle (state != running). Timeout 3 min por si algo raro.
+for _ in $(seq 1 36); do
+    sleep 5
+    STATE=$(launchctl print "gui/$(id -u)/com.masterescala.comunidad-vip-consolidar" 2>/dev/null | grep -m1 "state =" | awk '{print $3}')
+    [ "$STATE" != "running" ] && break
+done
+echo "  ✓ consolidar finalizó (state=$STATE)"
+
 echo "▶ refrescar_contactos_ghl.py"
 $PY refrescar_contactos_ghl.py >/dev/null || { echo "✗ refrescar falló"; exit 1; }
 echo "▶ reclasificar.py"
@@ -72,14 +85,30 @@ git pull --rebase origin gh-pages >/dev/null 2>&1 || true
 mkdir -p "$DEST_DIR"
 cp "$HERE/dashboard.html" "$DEST_DIR/index.html"
 
-# Ruta raíz redirige al hash (para que la base sea limpia, pero no expone listado)
+# .nojekyll: le dice a GitHub Pages "no proceses con Jekyll, sirve estático".
+# Sin esto, Pages intenta parsear el HTML de 30 MB con Jekyll y hace timeout/error.
+touch "$PUBLISH_DIR/.nojekyll"
+
+# escalafon.json: API estática de consulta para la landing.
+# URL pública estable: https://<usuario>.github.io/<repo>/escalafon.json
+# Correos SHA-256 hasheados — no exponen lista de correos.
+if [ -f "$HERE/escalafon.json" ]; then
+    cp "$HERE/escalafon.json" "$PUBLISH_DIR/escalafon.json"
+fi
+
+# Ruta raíz redirige al hash con un parámetro de versión (?v=timestamp). Como el
+# dashboard vive siempre en la misma URL fija, sin esto el navegador (y el iframe
+# de GHL) reusan la copia cacheada. El ?v= cambia en cada publicación → fuerza
+# recarga del HTML nuevo. La raíz se cachea solo 10 min, así que el visitante ve
+# la versión fresca a más tardar ~10 min después de cada publicación.
+VSTAMP=$(date +%Y%m%d%H%M%S)
 cat > "$PUBLISH_DIR/index.html" <<EOF
 <!doctype html><meta charset="utf-8"><title>Comunidad VIP</title>
-<meta http-equiv="refresh" content="0; url=./$HASH_PATH/">
+<meta http-equiv="refresh" content="0; url=./$HASH_PATH/?v=$VSTAMP">
 EOF
 
 # 4. Commit + push si hay cambios
-git add index.html "$HASH_PATH/index.html"
+git add index.html "$HASH_PATH/index.html" escalafon.json 2>/dev/null
 if git diff --cached --quiet; then
     echo "▶ Sin cambios en el HTML, no se commitea."
 else

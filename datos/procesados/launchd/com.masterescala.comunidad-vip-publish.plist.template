@@ -14,12 +14,16 @@
     <key>WorkingDirectory</key>
     <string>__INSTALL_DIR__</string>
 
-    <!-- Dispara a las 09:00, 14:00 y 18:00 hora local de la Mac todos los días. -->
+    <!-- Dispara a las 09:00, 10:15, 14:00 y 18:00 hora local de la Mac todos los días. -->
     <key>StartCalendarInterval</key>
     <array>
         <dict>
             <key>Hour</key><integer>9</integer>
             <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>10</integer>
+            <key>Minute</key><integer>15</integer>
         </dict>
         <dict>
             <key>Hour</key><integer>14</integer>
