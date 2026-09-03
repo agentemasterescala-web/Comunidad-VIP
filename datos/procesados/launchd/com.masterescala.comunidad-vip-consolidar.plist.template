@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.masterescala.comunidad-vip-consolidar</string>
+
+    <!-- IMPORTANTE: launchd lanza python DIRECTAMENTE (no vía bash). En macOS el
+         "proceso responsable" para TCC es el binario que lanza launchd; /bin/bash
+         es un binario de plataforma de Apple que NO retiene el permiso de Acceso
+         Total al Disco, así que un wrapper bash no puede leer Google Drive. Con
+         python como binario responsable, hereda el permiso concedido a
+         /Library/Developer/CommandLineTools/usr/bin/python3 y SÍ lee Drive.
+         Por eso este paso vive en su propio agente y NO dentro de pipeline_diario.sh. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__INSTALL_DIR__/consolidar_excel.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__INSTALL_DIR__</string>
+
+    <!-- Cada 10 minutos reconstruye maestro_emails.xlsx desde los Excels de Drive.
+         Es barato (segundos) y escribe de forma atómica (.tmp + os.replace), así que
+         no choca con reclasificar.py que lee el maestro desde otros agentes. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>2</integer></dict>
+        <dict><key>Minute</key><integer>12</integer></dict>
+        <dict><key>Minute</key><integer>22</integer></dict>
+        <dict><key>Minute</key><integer>32</integer></dict>
+        <dict><key>Minute</key><integer>42</integer></dict>
+        <dict><key>Minute</key><integer>52</integer></dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__INSTALL_DIR__/logs/launchd-consolidar.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__INSTALL_DIR__/logs/launchd-consolidar.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

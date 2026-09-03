@@ -55,7 +55,11 @@ run_step() {
 }
 
 run_step "Refrescar contactos GHL" /usr/bin/python3 refrescar_contactos_ghl.py || exit 1
-run_step "Consolidar Excels"       /usr/bin/python3 consolidar_excel.py        || exit 1
+# Nota: 'Consolidar Excels' NO corre aquí. macOS TCC no concede acceso a Google
+# Drive cuando launchd lanza un script bash (el binario responsable es /bin/bash,
+# un binario de plataforma de Apple que no retiene el permiso). La consolidación
+# vive en su propio agente que launchd ejecuta como python directo:
+# com.masterescala.comunidad-vip-consolidar (ver launchd/).
 run_step "Reclasificar (reporte)"  /usr/bin/python3 reclasificar.py            || exit 1
 run_step "Escribir a GHL"          /usr/bin/python3 escribir_a_ghl.py          || exit 1
 run_step "Generar dashboard"       /usr/bin/python3 generar_dashboard.py       || true

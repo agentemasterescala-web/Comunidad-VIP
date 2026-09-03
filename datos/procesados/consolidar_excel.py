@@ -67,6 +67,9 @@ def norm(s):
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     return s.lower()
 
+COUNTRY_NAMES = {"ARGENTINA","CHILE","COLOMBIA","ECUADOR","GUATEMALA",
+                 "MEXICO","PANAMA","PARAGUAY","PERU","COSTARICA","COSTARRICA"}
+
 def country_from_filename(fn):
     fn = os.path.basename(fn).upper()
     for c in ("ARGENTINA","CHILE","COLOMBIA","ECUADOR","GUATEMALA","MEXICO","PANAMA","PARAGUAY","PERU","COSTARICA","COSTA RICA"):
@@ -74,12 +77,28 @@ def country_from_filename(fn):
             return c.replace("COSTA RICA","COSTARICA")
     return "DESCONOCIDO"
 
+def is_consolidated_workbook(wb, fn):
+    """Decide si un workbook es 'multi-país en una sola hoja por país'.
+    Verdadero si el nombre del archivo contiene 'paises' (convención original)
+    o si el workbook tiene >=2 hojas con nombre de país (ej. mayo 2026, donde
+    el archivo se llama solo 'IVAN CAICEDO MAYO.xlsx' sin 'paises')."""
+    if "paises" in os.path.basename(fn).lower():
+        return True
+    country_sheets = 0
+    for sn in wb.sheetnames:
+        sn_up = sn.upper().replace(" ","")
+        if any(c in sn_up for c in COUNTRY_NAMES):
+            country_sheets += 1
+    return country_sheets >= 2
+
 def find_header_row(ws, max_scan=10):
-    """Encuentra la fila que contiene 'email' (o 'USUARIOS') y métricas."""
+    """Encuentra la fila que contiene 'email' (o 'USUARIOS'/'USUARIO') y métricas.
+    Acepta 'entregados' (formato hasta Jun 2026) y 'entregadas' (formato Jul 2026+)."""
     for i, row in enumerate(ws.iter_rows(values_only=True, max_row=max_scan), start=1):
         norms = [norm(c) for c in row]
-        if "email" in norms or "usuarios" in norms:
-            if any("entregados" == n for n in norms) or any("ord. ing." in n or "ord ing" in n for n in norms):
+        if "email" in norms or "usuarios" in norms or "usuario" in norms:
+            if any(n in ("entregados","entregadas") for n in norms) \
+               or any("ord. ing." in n or "ord ing" in n for n in norms):
                 return i, row
     return None, None
 
@@ -95,7 +114,39 @@ def parse_sheet(ws, country, month_label):
     if hdr is None:
         return []
 
-    col_email = col_index(hdr, {"email","usuarios"})
+    # Elegir la columna del email del vendedor. Formatos que hemos visto:
+    #   • Hasta Abr 2026:  solo "USUARIOS" con el correo.
+    #   • May 2026:        "USUARIOS" con el correo + "Email" con el correo del
+    #                      líder/gestor del grupo (varias filas comparten Email,
+    #                      así que usar "Email" mete doble/multi-conteo).
+    #   • Jun 2026:        solo "email" con el correo.
+    #   • Jul 2026+:       "Usuario" con el NOMBRE + "Email" con el correo.
+    # Regla: si existen ambas columnas, muestreamos las primeras filas y usamos
+    # la que tenga MÁS emails únicos válidos (el correo del vendedor cambia
+    # fila a fila; el email del líder se repite).
+    col_email = None
+    cand_usuarios = col_index(hdr, {"usuarios","usuario"})
+    cand_email = col_index(hdr, {"email"})
+    if cand_usuarios is None:
+        col_email = cand_email
+    elif cand_email is None:
+        col_email = cand_usuarios
+    else:
+        # Ambas presentes → muestrear filas siguientes al header
+        sample_rows = list(ws.iter_rows(min_row=hdr_row_idx+1, max_row=hdr_row_idx+60, values_only=True))
+        def unique_valid_emails(col_ix):
+            s = set()
+            for row in sample_rows:
+                if col_ix < len(row):
+                    v = row[col_ix]
+                    if v and isinstance(v, str) and "@" in v and "." in v.split("@")[-1]:
+                        s.add(v.strip().lower())
+            return len(s)
+        n_u = unique_valid_emails(cand_usuarios)
+        n_e = unique_valid_emails(cand_email)
+        # Se prefiere la columna con más correos únicos (el "USUARIOS" en mayo
+        # es único por fila; el "Email" del líder se repite decenas de veces).
+        col_email = cand_usuarios if n_u >= n_e else cand_email
     col_nombre = col_index(hdr, {"nombre"})
     col_tel = col_index(hdr, {"telefono"})
     # Si nombre/telefono no estan en el header principal, pueden venir como sub-headers
@@ -111,18 +162,29 @@ def parse_sheet(ws, country, month_label):
         if col_tel is None:
             col_tel = col_index(next_row, {"telefono"})
 
-    # Métricas: ENTREGADOS y DEVOLUCIONES (no las % variantes)
+    # Métricas: ENTREGADOS y DEVOLUCIONES.
+    # Formato hasta Jun 2026: columnas 'entregados' y 'devoluciones' (masc plural).
+    # Formato Jul 2026+:      columnas 'entregadas' y 'movilizadas' — donde
+    #                         movilizadas = entregadas + devoluciones (equivalente
+    #                         a "pedidos" del sistema viejo). Devoluciones se
+    #                         calcula como (movilizadas - entregadas).
     col_entregados = None
     col_devoluciones = None
+    col_movilizadas = None
     for idx, c in enumerate(hdr):
         n = norm(c)
-        if n == "entregados":
+        if n in ("entregados","entregadas"):
             col_entregados = idx
-        elif n == "devoluciones":
+        elif n in ("devoluciones","devueltas"):
             col_devoluciones = idx
+        elif n == "movilizadas":
+            col_movilizadas = idx
 
-    if col_email is None or col_entregados is None or col_devoluciones is None:
-        print(f"  ⚠ {country} {month_label}: header incompleto, skip")
+    if col_email is None or col_entregados is None:
+        print(f"  ⚠ {country} {month_label}: header incompleto (falta email/entregados), skip")
+        return []
+    if col_devoluciones is None and col_movilizadas is None:
+        print(f"  ⚠ {country} {month_label}: header sin devoluciones ni movilizadas, skip")
         return []
 
     out = []
@@ -140,15 +202,26 @@ def parse_sheet(ws, country, month_label):
         nombre = row[col_nombre] if col_nombre is not None and col_nombre < len(row) else None
         tel = row[col_tel] if col_tel is not None and col_tel < len(row) else None
         ent = row[col_entregados] if col_entregados < len(row) else 0
-        dev = row[col_devoluciones] if col_devoluciones < len(row) else 0
         try:
-            ent = int(ent) if ent not in (None, "") else 0
+            ent = int(float(ent)) if ent not in (None, "") else 0
         except (TypeError, ValueError):
             ent = 0
-        try:
-            dev = int(dev) if dev not in (None, "") else 0
-        except (TypeError, ValueError):
-            dev = 0
+        # Devoluciones: si existe columna, usarla directamente. Si no, derivar de
+        # (movilizadas - entregadas) — equivale a "devoluciones" del formato viejo,
+        # ya que movilizadas = entregadas + devoluciones en el formato Jul 2026+.
+        if col_devoluciones is not None:
+            dev = row[col_devoluciones] if col_devoluciones < len(row) else 0
+            try:
+                dev = int(float(dev)) if dev not in (None, "") else 0
+            except (TypeError, ValueError):
+                dev = 0
+        else:
+            mov = row[col_movilizadas] if col_movilizadas < len(row) else 0
+            try:
+                mov = int(float(mov)) if mov not in (None, "") else 0
+            except (TypeError, ValueError):
+                mov = 0
+            dev = max(0, mov - ent)  # nunca negativo
         pedidos = ent + dev
         out.append({
             "email": email_norm,
@@ -176,13 +249,11 @@ def main():
             except Exception as e:
                 print(f"  ✗ error: {e}")
                 continue
-            consolidated = ("paises" in os.path.basename(fn).lower())
+            consolidated = is_consolidated_workbook(wb, fn)
             if consolidated:
                 # Una hoja por país. Las versiones nuevas (Abril 2026+) traen 3
                 # hojas por país: <PAIS> USUARIOS, PRODUCTOS <PAIS>, PROVEEDORES
                 # <PAIS>. Solo procesamos las que contengan datos por usuario.
-                COUNTRY_NAMES = {"ARGENTINA","CHILE","COLOMBIA","ECUADOR","GUATEMALA",
-                                 "MEXICO","PANAMA","PARAGUAY","PERU","COSTARICA","COSTARRICA"}
                 for sn in wb.sheetnames:
                     sn_up = sn.upper().replace(" ","").replace("Á","A").replace("É","E").replace("Í","I").replace("Ó","O").replace("Ú","U")
                     if any(s in sn_up for s in ("PRODUCTO","PROVEEDOR")):
@@ -229,6 +300,17 @@ def main():
         if not agg[k]["telefono"] and r["telefono"]:
             agg[k]["telefono"] = r["telefono"]
 
+    # Guarda anti-borrado: si no se leyó ningún registro (p. ej. el proceso
+    # de launchd no tiene acceso a Google Drive / Full Disk Access), NO
+    # sobrescribir el maestro existente con datos vacíos. Aborta con código
+    # de error para que el pipeline se detenga y conserve el último maestro bueno.
+    if not all_records:
+        print("\n❌ 0 registros leídos de los Excels de Dropi.")
+        print(f"   Verifica que '{ROOT}' sea accesible (Google Drive montado y con")
+        print("   Full Disk Access para el proceso que ejecuta el pipeline).")
+        print("   maestro_emails.xlsx NO se sobrescribe para no perder datos.")
+        raise SystemExit(1)
+
     # Escribir maestro
     out_path = os.path.join(OUT_DIR, "maestro_emails.xlsx")
     wb_out = openpyxl.Workbook()
@@ -256,7 +338,12 @@ def main():
         top1, top2 = sorted_v[0], sorted_v[1] if len(sorted_v)>1 else 0
         ws2.append([email, pais, nombre, tel] + vals + [sum(vals), top1, top2, top1+top2])
 
-    wb_out.save(out_path)
+    # Escritura atómica: guardar a un temporal y reemplazar de golpe, para que
+    # un lector concurrente (reclasificar.py corre en su propio agente) nunca
+    # vea un .xlsx a medio escribir.
+    tmp_path = out_path + ".tmp"
+    wb_out.save(tmp_path)
+    os.replace(tmp_path, out_path)
     print(f"\n✅ Maestro escrito en: {out_path}")
     print(f"   - Hoja MAESTRO: {len(agg)} filas (email × pais × mes)")
     print(f"   - Hoja PIVOT_USUARIO_PAIS: {len(pivot)} filas (email × pais)")
