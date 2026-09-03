@@ -3,7 +3,7 @@
 Dashboard del Panel Comunidad VIP — Iván Caicedo.
 Layout tipo panel ejecutivo con tabs, charts y métricas en vivo.
 """
-import os, json, html, re
+import os, json, html, re, hashlib
 from datetime import datetime
 from collections import defaultdict, Counter
 import openpyxl
@@ -16,12 +16,16 @@ MAESTRO = os.path.join(HERE, "maestro_emails.xlsx")
 CLAS = os.path.join(HERE, "clasificacion_usuarios.xlsx")
 OUT = os.path.join(HERE, "dashboard.html")
 
-TIENDA_IDS = {
+# IMPORTANTE: lista (no set) para garantizar orden de iteración estable entre
+# ejecuciones. Un set daría orden distinto en cada corrida por hash randomization,
+# lo que provocaba que `paises` cambiara de orden en cada regeneración del
+# dashboard.html y rompía el change detection del publish-light.
+TIENDA_IDS = [
     "CQk3UpeEwUnbegiqR2Q3","P3jZOcralEFKIg4XpYho","p7TjCy0lVm6fP9xEbS3l",
     "CZSUn21ycO4tr4LkNrbj","Mir5XAqxPoCrfT3fkgRF","riVtpCpiQPJvASPdEkKd",
     "ThOpku1erpbHGCCBei6Z","83RmxTxcA8gkkWUsADls","2bl6kY6oQEIbPRRKpmaq",
     "75tlJ2SQeSdymOTxoScY"
-}
+]
 TIENDA_PAIS_IDS = {
     "CQk3UpeEwUnbegiqR2Q3":"0HWT1wbaaadgxxBPODUH","P3jZOcralEFKIg4XpYho":"yJyX6eZUzkgnpBmAslde",
     "p7TjCy0lVm6fP9xEbS3l":"IsI0hZEBHczVZ0itmPmV","CZSUn21ycO4tr4LkNrbj":"CqZvpz0gtfu4bvCZwNqA",
@@ -177,16 +181,63 @@ def load_maestro_window():
     return db, months
 
 
+_PAIS_CANONICO = {
+    "colombia":"Colombia","ecuador":"Ecuador","peru":"Perú","mexico":"México",
+    "guatemala":"Guatemala","panama":"Panamá","chile":"Chile","argentina":"Argentina",
+    "paraguay":"Paraguay","uruguay":"Uruguay","bolivia":"Bolivia","venezuela":"Venezuela",
+    "costarica":"Costa Rica","honduras":"Honduras","elsalvador":"El Salvador",
+    "nicaragua":"Nicaragua","republicadominicana":"República Dominicana",
+    "brasil":"Brasil","brazil":"Brasil","españa":"España","espana":"España",
+    "estadosunidos":"Estados Unidos","usa":"Estados Unidos",
+}
+def pais_canonico(p):
+    """Colapsa variantes ('COLOMBIA'/'colombia'/'Colombia') a forma canónica.
+    Fallback: title case sin acentos si no está en el mapa."""
+    if not p: return ""
+    import unicodedata as _ud
+    k = "".join(c for c in _ud.normalize("NFD", str(p)) if not _ud.combining(c))
+    k = k.lower().strip().replace(" ", "")
+    if k in _PAIS_CANONICO: return _PAIS_CANONICO[k]
+    return " ".join(w.capitalize() for w in str(p).strip().split())
+
 def extract_tiendas(contact):
+    """Extrae las tiendas de un contacto GHL. Dedupea por (email, país) — así un
+    contacto puede tener el MISMO email registrado en dos slots con países
+    distintos (ej. una cuenta Dropi que opera en Colombia y Guatemala) y ambas
+    tiendas aparecen. Solo se filtra la duplicación exacta (mismo email + mismo país)."""
     cf = {f["id"]: f.get("value") for f in contact.get("customFields", [])}
-    seen = {}
+    seen = {}   # key: (email, pais_normalizado) → tienda
     for fid in TIENDA_IDS:
         em = cf.get(fid)
         if em and isinstance(em, str) and "@" in em:
             em_low = em.strip().lower()
-            if em_low not in seen:
-                seen[em_low] = {"email": em_low, "pais": cf.get(TIENDA_PAIS_IDS[fid]) or ""}
+            pais = (cf.get(TIENDA_PAIS_IDS[fid]) or "").strip()
+            key = (em_low, pais.lower())
+            if key not in seen:
+                seen[key] = {"email": em_low, "pais": pais}
     return list(seen.values())
+
+
+def derivar_paises(contact, maestro):
+    """Países de un contacto, derivados del Excel por país de Dropi.
+    Combina: el campo 'país' de cada tienda del contacto + los países de las ventas
+    Dropi asociadas (buscando por el email de cada tienda Y por el email principal).
+    Devuelve lista única ordenada. (Mismo criterio que la clasificación VIP.)"""
+    paises = set()
+    tienda_emails = set()
+    for t in extract_tiendas(contact):
+        tienda_emails.add(t["email"])
+        if t["pais"]:
+            paises.add(t["pais"])
+        for mr in maestro.get(t["email"], []):
+            if mr.get("pais"):
+                paises.add(mr["pais"])
+    em_principal = (contact.get("email") or "").strip().lower()
+    if em_principal and em_principal not in tienda_emails:
+        for mr in maestro.get(em_principal, []):
+            if mr.get("pais"):
+                paises.add(mr["pais"])
+    return sorted(paises)
 
 
 def first_seen_month(maestro, email):
@@ -324,16 +375,34 @@ def compute_all():
         paises_lista = []   # una entrada por cada tienda (puede repetirse país si tiene varios correos en el mismo país)
         paises_set = set()  # para flag "multi-país" (países únicos)
         tienda_emails = set()
+        # Desglose por país (canónico) → {mes: valor}, para permitir filtrar
+        # la vista por país y ver solo las ventas realizadas en ese país.
+        ped_mes_pais = {}   # {pais_canonico: {mes: pedidos}}
+        ent_mes_pais = {}
+        dev_mes_pais = {}
+        # Fase 1: recolectar países y emails únicos (extract_tiendas puede devolver
+        # el MISMO email en dos slots con países distintos — ej. un correo Dropi que
+        # opera en Colombia y Ecuador — y en ese caso ambas tiendas deben aparecer
+        # en la lista de países, pero maestro.get(email) devuelve TODAS las filas
+        # de ese email así que sumarlo dos veces es doble conteo).
         for t in tiendas:
             tienda_emails.add(t["email"])
             if t["pais"]:
                 paises_lista.append(t["pais"])
                 paises_set.add(t["pais"])
-            for mr in maestro.get(t["email"], []):
+        # Fase 2: sumar el maestro UNA SOLA VEZ por email único.
+        for em in tienda_emails:
+            for mr in maestro.get(em, []):
                 if mr["mes"] in ped_mes:
                     ped_mes[mr["mes"]] += mr["pedidos"]
                     ent_mes[mr["mes"]] += mr["entregados"]
                     dev_mes[mr["mes"]] += mr["devoluciones"]
+                    # Acumular por país canónico (colapsa 'COLOMBIA'/'Colombia'/'colombia')
+                    pais_c = pais_canonico(mr.get("pais") or "")
+                    if pais_c:
+                        ped_mes_pais.setdefault(pais_c, {m:0 for m in months})[mr["mes"]] += mr["pedidos"]
+                        ent_mes_pais.setdefault(pais_c, {m:0 for m in months})[mr["mes"]] += mr["entregados"]
+                        dev_mes_pais.setdefault(pais_c, {m:0 for m in months})[mr["mes"]] += mr["devoluciones"]
         # También las ventas asociadas al EMAIL PRINCIPAL si está en el maestro
         # (caso VIP SIN FORM: vendedores creados sin tiendas, su email vende en Dropi).
         em_principal = (c.get("email") or "").strip().lower()
@@ -343,6 +412,11 @@ def compute_all():
                     ped_mes[mr["mes"]] += mr["pedidos"]
                     ent_mes[mr["mes"]] += mr["entregados"]
                     dev_mes[mr["mes"]] += mr["devoluciones"]
+                    pais_c = pais_canonico(mr.get("pais") or "")
+                    if pais_c:
+                        ped_mes_pais.setdefault(pais_c, {m:0 for m in months})[mr["mes"]] += mr["pedidos"]
+                        ent_mes_pais.setdefault(pais_c, {m:0 for m in months})[mr["mes"]] += mr["entregados"]
+                        dev_mes_pais.setdefault(pais_c, {m:0 for m in months})[mr["mes"]] += mr["devoluciones"]
                 if mr.get("pais") and mr["pais"] not in paises_set:
                     paises_lista.append(mr["pais"]); paises_set.add(mr["pais"])
             if maestro.get(em_principal):
@@ -383,6 +457,15 @@ def compute_all():
         #   "Desaparecido"  → último mes en 0 (con actividad previa)
         # Y crítica (puede coexistir):
         #   "Crítica"       → % devolución > 50%
+        # Países donde el email vende (según Dropi) pero que NO están declarados
+        # como tienda en GHL. Indica que hay que actualizar el formulario del
+        # contacto o que Dropi tiene el país mal clasificado.
+        _paises_declarados_set = {pais_canonico(t["pais"]) for t in tiendas if t["pais"]}
+        paises_no_declarados = sorted(
+            p for p, pm in ped_mes_pais.items()
+            if p not in _paises_declarados_set and any(v > 0 for v in pm.values())
+        )
+        tiene_no_declarada = bool(paises_no_declarados)
         alerta_tipo = None
         # 1. Huérfana: tiene tienda pero NUNCA vendió en toda la ventana
         if not sin_tienda and total_ped == 0:
@@ -403,6 +486,10 @@ def compute_all():
         es_critica = pct_dev > 50 and total_ped > 0
         if alerta_tipo is None and es_critica:
             alerta_tipo = "Crítica"
+        # 6. Tienda no declarada (solo si no hay otra alerta más grave; el flag
+        # separado `tiene_no_declarada` permite marcarla en la UI aunque exista otra).
+        if alerta_tipo is None and tiene_no_declarada:
+            alerta_tipo = "Tienda no declarada"
 
         # Semáforo: verde=ok, amarillo=desap/crit, naranja=riesgo, rojo=eliminado/sin nivel/sin tienda
         if sin_tienda: semaforo = "rojo"
@@ -419,6 +506,13 @@ def compute_all():
             "n_tiendas": len(tiendas),
             "paises": paises_lista,
             "paises_unicos": sorted(paises_set),
+            # Países DECLARADOS en GHL (via slots país de tiendas). Se usa para
+            # marcar ⚠ ventas en países no declarados (donde el correo aparece
+            # en Dropi pero el usuario no tiene tienda registrada allí).
+            "paises_declarados": sorted({pais_canonico(t["pais"]) for t in tiendas if t["pais"]}),
+            # Países donde el email vende en Dropi pero NO están declarados en GHL.
+            "paises_no_declarados": paises_no_declarados,
+            "tiene_no_declarada": tiene_no_declarada,
             "tiendas_detalle": [
                 {"email": t["email"], "pais": t["pais"], "primera_vez": first_seen_month(maestro, t["email"])}
                 for t in tiendas
@@ -426,6 +520,12 @@ def compute_all():
             "ped_mes": ped_mes,
             "ent_mes": ent_mes,
             "dev_mes": dev_mes,
+            # Desglose por país canónico → {mes: valor}. Se usa cuando el
+            # usuario filtra por país en el dashboard, para mostrar SOLO
+            # las ventas realizadas en ese país en vez del total del usuario.
+            "ped_mes_pais": ped_mes_pais,
+            "ent_mes_pais": ent_mes_pais,
+            "dev_mes_pais": dev_mes_pais,
             "total_pedidos": total_ped,
             "pct_dev": round(pct_dev, 1),
             "active": active,
@@ -555,12 +655,14 @@ def compute_all():
             prog = "Iniciación Escala"; cnt_iniciacion += 1
         else:
             prog = "Sin programa"; cnt_sin_prog += 1
+        paises_c = derivar_paises(c, maestro)
         item = {
             "cid": c["id"],
             "nombre": c.get("contactName") or "",
             "email": (c.get("email") or "").lower(),
             "telefono": c.get("phone") or "",
             "programa": prog,
+            "paises": paises_c,
             "tiene_vip_new": has_vip,
         }
         # Vista 2 incluye TODOS (incluyendo Sin programa para tener conteo completo)
@@ -573,13 +675,17 @@ def compute_all():
         if has_m or has_i:
             tiendas_e = extract_tiendas(c)
             ped_mes_e = {mo: 0 for mo in months}
-            paises_e = []
-            for t in tiendas_e:
-                if t["pais"]:
-                    paises_e.append(t["pais"])
-                for mr in maestro.get(t["email"], []):
+            ped_mes_pais_e = {}   # {pais_canonico: {mes: pedidos}} para filtro
+            # Dedup por email único (ver fix del mismo bug arriba: extract_tiendas
+            # puede devolver un correo en dos slots con países distintos → sumar
+            # maestro.get(email) dos veces es doble conteo).
+            for em in {t["email"] for t in tiendas_e}:
+                for mr in maestro.get(em, []):
                     if mr["mes"] in ped_mes_e:
                         ped_mes_e[mr["mes"]] += mr["pedidos"]
+                        pais_c = pais_canonico(mr.get("pais") or "")
+                        if pais_c:
+                            ped_mes_pais_e.setdefault(pais_c, {mo:0 for mo in months})[mr["mes"]] += mr["pedidos"]
             total_ped_e = sum(ped_mes_e.values())
             met_estudiantes.append({
                 "cid": c["id"],
@@ -588,9 +694,10 @@ def compute_all():
                 "telefono": c.get("phone") or "",
                 "programa": prog,
                 "tiene_vip_new": has_vip,
-                "paises": paises_e,
+                "paises": paises_c,
                 "n_tiendas": len(tiendas_e),
                 "ped_mes": ped_mes_e,
+                "ped_mes_pais": ped_mes_pais_e,
                 "total_pedidos": total_ped_e,
                 "tiene_ventas": total_ped_e > 0,
                 "nivel": clasificar_nivel(ped_mes_e.values()),
@@ -626,6 +733,8 @@ def compute_all():
             "nombre": nombre_em,
             "telefono": tel_em,
             "paises": paises_em,
+            # No están en GHL → no tienen tags de programa formativo.
+            "programa": "Sin programa",
             "total_pedidos": total_ped,
             "total_entregados": total_ent,
             "total_devoluciones": total_dev,
@@ -756,7 +865,19 @@ def compute_all():
             "duplicados_total": len(met_duplicados),
             "duplicados_contactos_unicos": len({d["cid"] for d in met_duplicados}),
         },
+        "pagos": load_pagos(),
     }
+
+
+def load_pagos():
+    """Carga pagos.json (generado por extraer_pagos.py). Devuelve [] si no existe
+    aún (el backfill inicial puede no haber terminado)."""
+    path = os.path.join(HERE, "pagos.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
 
 
 def render_html(data):
@@ -858,17 +979,6 @@ def render_html(data):
   </div>
 </div>
 
-<!-- MODAL ENVÍO DE CORREO -->
-<div id="envio-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm overflow-y-auto" onclick="if(event.target===this)cerrarModalEnvio()">
-  <div class="max-w-3xl mx-auto my-6 p-4">
-    <div class="flex items-center justify-between mb-3">
-      <h2 class="text-sm font-semibold neon-cyan uppercase tracking-wider">Envío de correo</h2>
-      <button onclick="cerrarModalEnvio()" class="text-slate-400 hover:text-white text-2xl leading-none">×</button>
-    </div>
-    <div id="envio-content"></div>
-  </div>
-</div>
-
 <script>
 const DATA = __DATA_JSON__;
 const tierColor = {
@@ -892,22 +1002,113 @@ function tc(s) {
   }).join('');
 }
 
+// Normaliza un nombre de país a su forma canónica: quita acentos, colapsa
+// espacios y devuelve Title Case. "COLOMBIA" / "colombia" / "Colombia" → "Colombia".
+// "COSTARICA" / "Costa Rica" → "Costa Rica".
+const _PAIS_CANONICO = {
+  "colombia":"Colombia","ecuador":"Ecuador","peru":"Perú","mexico":"México",
+  "guatemala":"Guatemala","panama":"Panamá","chile":"Chile","argentina":"Argentina",
+  "paraguay":"Paraguay","uruguay":"Uruguay","bolivia":"Bolivia","venezuela":"Venezuela",
+  "costarica":"Costa Rica","costa rica":"Costa Rica","honduras":"Honduras",
+  "elsalvador":"El Salvador","el salvador":"El Salvador","nicaragua":"Nicaragua",
+  "republicadominicana":"República Dominicana","republica dominicana":"República Dominicana",
+  "brasil":"Brasil","brazil":"Brasil","españa":"España","espana":"España",
+  "estadosunidos":"Estados Unidos","usa":"Estados Unidos",
+};
+function _paisKey(p) {
+  return (p||'').toString().normalize("NFD").replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase().trim().replace(/\s+/g,'');
+}
+function paisNorm(p) {
+  const k = _paisKey(p);
+  if (!k) return '';
+  if (_PAIS_CANONICO[k]) return _PAIS_CANONICO[k];
+  // Fallback Title Case si no está en el mapa
+  return (p||'').toString().trim().toLowerCase()
+    .split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+function paisesUnicos(arr) {
+  // Colapsa por versión normalizada (case + acento-insensitive)
+  const seen = new Map();  // key → nombre canónico
+  (arr||[]).forEach(p => {
+    const k = _paisKey(p);
+    if (k && !seen.has(k)) seen.set(k, paisNorm(p));
+  });
+  return [...seen.values()].sort();
+}
+function paisMatch(userPaises, filtro) {
+  // Match case + acento-insensitive
+  if (!filtro || filtro === 'Todos') return true;
+  const k = _paisKey(filtro);
+  return (userPaises||[]).some(p => _paisKey(p) === k);
+}
+// Devuelve una versión del usuario con las métricas subseteadas SOLO al país
+// dado. Recalcula ped_mes, ent_mes, dev_mes, total_pedidos, top1/top2/top3,
+// suma_top2/3, active y pct_dev usando ped_mes_pais/ent_mes_pais/dev_mes_pais.
+// Si el usuario no tiene desglose por país o filtro='Todos' → devuelve u tal cual.
+function viewByPais(u, pais) {
+  if (!pais || pais === 'Todos') return u;
+  const key = _paisKey(pais);
+  const src = u.ped_mes_pais || {};
+  // buscar la key coincidente con normalización
+  const paisMatched = Object.keys(src).find(k => _paisKey(k) === key);
+  if (!paisMatched) return u;   // usuario no vendió en ese país
+  const pm = src[paisMatched] || {};
+  const em = (u.ent_mes_pais && u.ent_mes_pais[paisMatched]) || {};
+  const dm = (u.dev_mes_pais && u.dev_mes_pais[paisMatched]) || {};
+  const meses = Object.keys(pm);
+  const total = meses.reduce((s,m) => s + (pm[m]||0), 0);
+  const totalEnt = meses.reduce((s,m) => s + (em[m]||0), 0);
+  const totalDev = meses.reduce((s,m) => s + (dm[m]||0), 0);
+  const sv = Object.values(pm).sort((a,b) => b - a);
+  const top1 = sv[0]||0, top2 = sv[1]||0, top3 = sv[2]||0;
+  const active = Object.values(pm).filter(v => v > 0).length;
+  const pct = total > 0 ? +(totalDev / total * 100).toFixed(1) : 0;
+  return { ...u,
+    ped_mes: pm, ent_mes: em, dev_mes: dm,
+    total_pedidos: total, top1, top2, top3,
+    suma_top2: top1+top2, suma_top3: top1+top2+top3,
+    active, pct_dev: pct,
+    _filtered_pais: paisMatched,
+  };
+}
+
+// Dropdown reutilizable de filtro por país. `users` = lista de la vista (cada uno
+// con .paises o .paises_unicos). `current` = valor seleccionado. `cls` opcional.
+function paisSelectHTML(id, users, current, cls) {
+  const all = paisesUnicos((users||[]).flatMap(u => u.paises_unicos || u.paises || []));
+  cls = cls || 'bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500';
+  return `<select id="${id}" class="${cls}">
+    <option value="Todos">Todos los países</option>
+    ${all.map(p => `<option value="${p}" ${current===p?'selected':''}>${flag(p)} ${p}</option>`).join('')}
+  </select>`;
+}
+
 function actualizarFrescura() {
   const gen = new Date(DATA.meta.generated_iso);
   const seg = Math.floor((Date.now() - gen.getTime())/1000);
+  // Umbral de "conviene actualizar" según el contexto:
+  //  - Versión PUBLICADA (GitHub Pages / embebida en GHL): la rutina publish la
+  //    regenera 3x/día (09/14/18h); el mayor hueco normal es de noche (~15h), así
+  //    que solo avisamos si pasaron >18h = una publicación falló de verdad.
+  //  - Versión LOCAL en vivo (localhost/file): refresca cada 90s; avisamos a los
+  //    10 min para detectar si el refresco se detuvo.
+  const esLocal = location.protocol === 'file:' ||
+                  ['localhost','127.0.0.1'].includes(location.hostname);
+  const STALE = esLocal ? 600 : 18*3600;
   let txt;
   if (seg < 60) txt = `hace ${seg}s`;
   else if (seg < 3600) txt = `hace ${Math.floor(seg/60)} min`;
   else txt = `hace ${Math.floor(seg/3600)} h`;
-  const color = seg<120?'text-green-400':seg<300?'text-yellow-400':'text-red-400';
+  const color = seg < STALE ? 'text-green-400' : 'text-red-400';
   document.getElementById("header-meta").innerHTML =
     `Último mes cargado: <span class="text-cyan-400">${DATA.meta.ultimo_mes_label}</span>  ·  ` +
     `Datos generados <span class="${color}">${txt}</span>` +
-    (seg >= 300 ? ` <span class="text-red-400 font-semibold">· conviene actualizar</span>` : '');
+    (seg >= STALE ? ` <span class="text-red-400 font-semibold">· conviene actualizar</span>` : '');
   // Resaltar el botón cuando los datos están viejos
   const btn = document.getElementById('btn-refresh');
   if (btn) {
-    if (seg >= 300) {
+    if (seg >= STALE) {
       btn.classList.add('active');
       btn.style.animation = 'pulse-warn 2s ease-in-out infinite';
     } else {
@@ -919,13 +1120,22 @@ function actualizarFrescura() {
 actualizarFrescura();
 setInterval(actualizarFrescura, 10000);
 
+// Auto-recarga cada 1 hora: el dashboard vive embebido en GHL (iframe), y un
+// iframe no se refresca solo aunque la rutina 'publish' suba HTML nuevo. Esto
+// garantiza que el visitante nunca vea una versión con más de 1 hora de edad,
+// sin importar cómo esté configurado el src del iframe en GHL.
+// La persistencia de pestaña/scroll/filtros en localStorage hace que la recarga
+// sea transparente para el usuario.
+setInterval(() => location.reload(), 60 * 60 * 1000);
+
 const CATEGORIES = [
-  {id:"vip",         label:"🏆 VIP"},
-  {id:"estudiantes", label:"🎓 Estudiantes"},
-  {id:"pendientes",  label:"📝 Pendientes por formulario"},
-  {id:"todos_vip",   label:"⭐ Todos VIP"},
-  {id:"otros",       label:"📦 Otros"},
-  {id:"config",      label:"⚙️ Configuración"},
+  {id:"vip",              label:"🏆 VIP"},
+  {id:"estudiantes",      label:"🎓 Estudiantes"},
+  {id:"pendientes",       label:"📝 Pendientes por formulario"},
+  {id:"todos_vip",        label:"⭐ Todos VIP"},
+  {id:"otros",            label:"📦 Otros"},
+  {id:"app_master_escala",label:"💰 App Master Escala"},
+  {id:"config",           label:"📋 Reglas"},
 ];
 // Las 4 audiencias comparten los mismos 3 sub-dashboards (resumen/clasif/alertas),
 // que se calculan sobre el subconjunto de usuarios de la categoría activa.
@@ -943,6 +1153,9 @@ const TABS_BY_CAT = {
     {id:"otros_resumen",  label:"📊 Resumen"},
     {id:"met_dropi_ghl",  label:"👻 Lista (Dropi sin GHL)"},
     {id:"met_duplicados", label:"🔁 Posibles duplicados"},
+  ],
+  "app_master_escala": [
+    {id:"pagos_dashboard", label:"💰 Pagos"},
   ],
   "config": [
     {id:"reglas",   label:"📋 Reglas VIP"},
@@ -1060,10 +1273,6 @@ window.addEventListener('load', () => {
 });
 renderCategories();
 renderTabs();
-detectarServidor().then(() => {
-  // Re-render si estamos en una vista que depende del estado del servidor
-  if (currentTab === 'met_sin_vip') render();
-});
 
 function statCard(label, n, sub, accentClass) {
   return `<div class="card p-4">
@@ -1198,7 +1407,7 @@ function renderClasificacion(limit) {
   if (currentVentas === "Con ventas") scope = scope.filter(u => (u.total_pedidos||0) > 0);
   else if (currentVentas === "Sin ventas") scope = scope.filter(u => (u.total_pedidos||0) === 0);
   if (currentProgs.size) scope = scope.filter(u => currentProgs.has(u.programa));
-  if (currentCountry !== "Todos") scope = scope.filter(u => (u.paises_unicos||[]).includes(currentCountry));
+  if (currentCountry !== "Todos") scope = scope.filter(u => paisMatch((u.paises_unicos||[]), currentCountry));
   if (currentMultipais) scope = scope.filter(u => (u.paises_unicos||[]).length > 1);
   if (currentSearch) {
     const s = currentSearch.toLowerCase();
@@ -1216,7 +1425,7 @@ function renderClasificacion(limit) {
 
   // counts por programa con todos los filtros excepto programa
   let scopeNoProg = users;
-  if (currentCountry !== "Todos") scopeNoProg = scopeNoProg.filter(u => (u.paises_unicos||[]).includes(currentCountry));
+  if (currentCountry !== "Todos") scopeNoProg = scopeNoProg.filter(u => paisMatch((u.paises_unicos||[]), currentCountry));
   if (currentMultipais) scopeNoProg = scopeNoProg.filter(u => (u.paises_unicos||[]).length > 1);
   if (currentSearch) {
     const s = currentSearch.toLowerCase();
@@ -1227,6 +1436,9 @@ function renderClasificacion(limit) {
 
   let filtered = scope;
   if (currentTiers.size) filtered = filtered.filter(u => currentTiers.has(u.nivel));
+  // Si hay filtro por país: subsetear las métricas al país (ped_mes/total/top3/%dev).
+  // El "nivel" no cambia (sigue siendo el del universo total del usuario).
+  if (currentCountry !== "Todos") filtered = filtered.map(u => viewByPais(u, currentCountry));
   // Orden configurable por la columna que el usuario clickee.
   // dir=+1 para desc (mayor→menor), -1 para asc (menor→mayor).
   const dir = sortDir === 'asc' ? -1 : 1;
@@ -1245,7 +1457,7 @@ function renderClasificacion(limit) {
     filtered.sort((a,b)=> dir*(((b.ped_mes&&b.ped_mes[sortCol])||0) - ((a.ped_mes&&a.ped_mes[sortCol])||0)));
   }
 
-  const allCountries = [...new Set(users.flatMap(u => u.paises_unicos||u.paises||[]))].sort();
+  const allCountries = paisesUnicos(users.flatMap(u => u.paises_unicos||u.paises||[]));
   const monthCols = DATA.meta.ventana.map(m => `<th data-sort="${m}" class="text-right text-[10px] uppercase tracking-wider cursor-pointer hover:text-cyan-300 select-none">${mesShort(m)}${sortArrow(m)}</th>`).join('');
 
   return `
@@ -1259,6 +1471,8 @@ function renderClasificacion(limit) {
           <option value="Todos">Todos los países</option>
           ${allCountries.map(p => `<option value="${p}" ${currentCountry===p?'selected':''}>${flag(p)} ${p}</option>`).join('')}
         </select>
+        <button id="clasif-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="clasif-xlsx" class="text-[11px] px-3 py-2 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
         <div class="ml-auto"><span class="pill bg-violet-500/20 text-violet-200 border-violet-500/40">${fmt(scope.length)} usuarios</span></div>
       </div>
 
@@ -1326,7 +1540,7 @@ function renderClasificacion(limit) {
                 <td class="text-slate-400 font-mono">${u.telefono||'—'}</td>
                 <td class="text-center"><span class="pill ${tierColor[u.nivel]}">${u.nivel==='Sin clasificar'?'Sin nivel':u.nivel}</span></td>
                 <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[u.programa]||'Sin definir'}</span></td>
-                <td class="text-[14px]">${u.sin_tienda?'<span class="pill bg-red-500/20 text-red-300 border-red-500/40 text-[10px]">⚠ Sin tienda</span>':((u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—')}</td>
+                <td class="text-[14px]">${u.sin_tienda?'<span class="pill bg-red-500/20 text-red-300 border-red-500/40 text-[10px]">⚠ Sin tienda</span>':((u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—')}${(u.paises_no_declarados||[]).length ? ` <span class="pill bg-amber-500/20 text-amber-300 border-amber-500/40 text-[9px]" title="Vende en ${(u.paises_no_declarados||[]).join(', ')} sin tener tienda declarada en GHL">⚠ ${(u.paises_no_declarados||[]).map(flag).join('')}</span>` : ''}</td>
                 ${DATA.meta.ventana.map(m => `<td class="text-right font-mono text-slate-400">${fmt(u.ped_mes[m])}</td>`).join('')}
                 <td class="text-right font-mono font-semibold text-slate-100">${fmt(u.total_pedidos)}</td>
                 <td class="text-right font-mono font-semibold text-cyan-300" title="Suma de los 3 mejores meses (define el escalafón)">${fmt(u.suma_top3)}</td>
@@ -1343,7 +1557,7 @@ function renderClasificacion(limit) {
   `;
 }
 
-let top100_desde = null, top100_hasta = null, top100_prog = "Todos", top100_tend = "Todas";
+let top100_desde = null, top100_hasta = null, top100_prog = "Todos", top100_tend = "Todas", top100_pais = "Todos";
 
 function tendencia(values) {
   // values: array de pedidos por mes (en orden cronológico) dentro del rango
@@ -1367,19 +1581,22 @@ function renderTop100() {
   }
   const rangeMonths = months.slice(months.indexOf(top100_desde), months.indexOf(top100_hasta)+1);
 
-  // Calcular sumas dentro del rango por usuario
+  // Calcular sumas dentro del rango por usuario. Si hay filtro por país,
+  // subseteamos las métricas del usuario al país (viewByPais).
   const list = DATA.usuarios.map(u => {
-    const ped = rangeMonths.reduce((s,m) => s + (u.ped_mes[m]||0), 0);
-    const ent = rangeMonths.reduce((s,m) => s + (u.ent_mes[m]||0), 0);
-    const dev = rangeMonths.reduce((s,m) => s + (u.dev_mes[m]||0), 0);
+    const uu = top100_pais !== "Todos" ? viewByPais(u, top100_pais) : u;
+    const ped = rangeMonths.reduce((s,m) => s + (uu.ped_mes[m]||0), 0);
+    const ent = rangeMonths.reduce((s,m) => s + (uu.ent_mes[m]||0), 0);
+    const dev = rangeMonths.reduce((s,m) => s + (uu.dev_mes[m]||0), 0);
     const pct = ped > 0 ? +(dev/ped*100).toFixed(1) : 0;
-    const tend = tendencia(rangeMonths.map(m => u.ped_mes[m]||0));
+    const tend = tendencia(rangeMonths.map(m => uu.ped_mes[m]||0));
     return { ...u, range_ped: ped, range_ent: ent, range_dev: dev, range_pct: pct, range_tend: tend };
   });
 
   // Filtros
   let filtered = list.filter(u => u.range_ped > 0);
   if (top100_prog !== "Todos") filtered = filtered.filter(u => u.programa === top100_prog);
+  if (top100_pais !== "Todos") filtered = filtered.filter(u => paisMatch((u.paises_unicos||u.paises||[]), top100_pais));
   if (top100_tend !== "Todas") filtered = filtered.filter(u => u.range_tend.key === top100_tend);
   filtered.sort((a,b) => b.range_ped - a.range_ped);
   const top = filtered.slice(0, 100);
@@ -1404,12 +1621,15 @@ function renderTop100() {
           <option value="Todos" ${top100_prog==='Todos'?'selected':''}>Todos los programas</option>
           ${PROG_ORDER.map(p => `<option value="${p}" ${top100_prog===p?'selected':''}>${PROG_SHORT[p]}</option>`).join('')}
         </select>
+        ${paisSelectHTML('t100-pais', list, top100_pais, 'bg-black/40 border border-white/10 rounded-lg px-2 py-1.5 text-xs')}
         <select id="t100-tend" class="bg-black/40 border border-white/10 rounded-lg px-2 py-1.5 text-xs">
           <option value="Todas" ${top100_tend==='Todas'?'selected':''}>Todas las tendencias</option>
           <option value="subiendo" ${top100_tend==='subiendo'?'selected':''}>▲ Subiendo</option>
           <option value="bajando"  ${top100_tend==='bajando'?'selected':''}>▼ Bajando</option>
           <option value="estable"  ${top100_tend==='estable'?'selected':''}>— Estable</option>
         </select>
+        <button id="t100-csv" class="text-[11px] px-3 py-1.5 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="t100-xlsx" class="text-[11px] px-3 py-1.5 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
       </div>
 
       <div class="overflow-x-auto scrollable">
@@ -1473,34 +1693,80 @@ function wireTop100() {
   const sh = document.getElementById('t100-hasta');
   const sp = document.getElementById('t100-prog');
   const st = document.getElementById('t100-tend');
+  const spa = document.getElementById('t100-pais');
   if (sd) sd.onchange = e => { top100_desde = e.target.value; render(); };
   if (sh) sh.onchange = e => { top100_hasta = e.target.value; render(); };
   if (sp) sp.onchange = e => { top100_prog = e.target.value; render(); };
   if (st) st.onchange = e => { top100_tend = e.target.value; render(); };
+  if (spa) spa.onchange = e => { top100_pais = e.target.value; render(); };
   document.querySelectorAll('[data-cid]').forEach(row => row.onclick = () => abrirFicha(row.dataset.cid));
+  function _top100Rows() {
+    const months = DATA.meta.ventana;
+    let d = top100_desde || months[0], h = top100_hasta || months[months.length-1];
+    if (months.indexOf(d) > months.indexOf(h)) { const t=d; d=h; h=t; }
+    const rangeMonths = months.slice(months.indexOf(d), months.indexOf(h)+1);
+    let list = DATA.usuarios.map(u => {
+      const uu = top100_pais !== "Todos" ? viewByPais(u, top100_pais) : u;
+      const ped = rangeMonths.reduce((s,m) => s + (uu.ped_mes[m]||0), 0);
+      const ent = rangeMonths.reduce((s,m) => s + (uu.ent_mes[m]||0), 0);
+      const dev = rangeMonths.reduce((s,m) => s + (uu.dev_mes[m]||0), 0);
+      const pct = ped > 0 ? +(dev/ped*100).toFixed(1) : 0;
+      const tend = tendencia(rangeMonths.map(m => uu.ped_mes[m]||0));
+      return { ...u, range_ped: ped, range_ent: ent, range_dev: dev, range_pct: pct, range_tend: tend };
+    }).filter(u => u.range_ped > 0);
+    if (top100_prog !== "Todos") list = list.filter(u => u.programa === top100_prog);
+    if (top100_pais !== "Todos") list = list.filter(u => paisMatch((u.paises_unicos||u.paises||[]), top100_pais));
+    if (top100_tend !== "Todas") list = list.filter(u => u.range_tend.key === top100_tend);
+    list.sort((a,b) => b.range_ped - a.range_ped);
+    const top = list.slice(0, 100);
+    const rows = [["#","Nombre","Email","Teléfono","Programa","Países","Nivel","Tendencia","Pedidos VIP","Entregados","Devueltos","% Dev.","Semáforo","Rango"]];
+    top.forEach((u,i) => rows.push([
+      i+1, u.nombre, u.email, u.telefono,
+      PROG_SHORT[u.programa]||u.programa||'Sin programa',
+      (u.paises_unicos||u.paises||[]).join('|'),
+      u.nivel==='Sin clasificar'?'Sin nivel':u.nivel,
+      u.range_tend.key, u.range_ped, u.range_ent, u.range_dev, u.range_pct,
+      u.semaforo||'', `${d} → ${h}`
+    ]));
+    return rows;
+  }
+  const bc = document.getElementById('t100-csv');
+  if (bc) bc.onclick = () => downloadCSV("top100_leaderboard.csv", _top100Rows());
+  const bx = document.getElementById('t100-xlsx');
+  if (bx) bx.onclick = () => _dlXLSX(bx, "top100_leaderboard.xlsx", _top100Rows(), "Top 100");
 }
 
-let alertaFiltroTipo = "Todas", alertaFiltroProg = "Todos", alertaSearch = "";
+let alertaFiltroTipo = "Todas", alertaFiltroProg = "Todos", alertaSearch = "", alertaPais = "Todos";
 
 function renderAlertas() {
   const users = baseUsers();
   const months = DATA.meta.ventana;
 
   // Counts globales
-  const cnt = { "Eliminado":0, "Riesgo":0, "Desaparecido":0, "Crítica":0, "Huérfana":0 };
+  const cnt = { "Eliminado":0, "Riesgo":0, "Desaparecido":0, "Crítica":0, "Huérfana":0, "Tienda no declarada":0 };
   users.forEach(u => {
     if (u.alerta_tipo) cnt[u.alerta_tipo] = (cnt[u.alerta_tipo]||0) + 1;
+    // "Tienda no declarada" también cuenta a los que la tienen como flag
+    // aunque tengan otra alerta primaria (ej: Eliminado + Tienda no declarada).
+    if (u.tiene_no_declarada && u.alerta_tipo !== "Tienda no declarada") cnt["Tienda no declarada"]++;
   });
-  const totalAlertas = users.filter(u => u.alerta_tipo).length;
+  const totalAlertas = users.filter(u => u.alerta_tipo || u.tiene_no_declarada).length;
 
   // Filtros
-  let filtered = users.filter(u => u.alerta_tipo); // solo con alguna alerta
-  if (alertaFiltroTipo !== "Todas") filtered = filtered.filter(u => u.alerta_tipo === alertaFiltroTipo);
+  let filtered = users.filter(u => u.alerta_tipo || u.tiene_no_declarada);
+  if (alertaFiltroTipo === "Tienda no declarada") {
+    filtered = filtered.filter(u => u.tiene_no_declarada);
+  } else if (alertaFiltroTipo !== "Todas") {
+    filtered = filtered.filter(u => u.alerta_tipo === alertaFiltroTipo);
+  }
   if (alertaFiltroProg !== "Todos") filtered = filtered.filter(u => u.programa === alertaFiltroProg);
+  if (alertaPais !== "Todos") filtered = filtered.filter(u => paisMatch((u.paises||u.paises_unicos||[]), alertaPais));
   if (alertaSearch) {
     const s = alertaSearch.toLowerCase();
     filtered = filtered.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
   }
+  // Subsetear ped_mes al país filtrado (los números mostrados en la tabla)
+  if (alertaPais !== "Todos") filtered = filtered.map(u => viewByPais(u, alertaPais));
 
   const alertColor = {
     "Crítica":     "bg-red-500/20 text-red-300 border-red-500/40",
@@ -1508,6 +1774,7 @@ function renderAlertas() {
     "Riesgo":      "bg-orange-500/20 text-orange-300 border-orange-500/40",
     "Desaparecido":"bg-yellow-500/20 text-yellow-300 border-yellow-500/40",
     "Huérfana":    "bg-violet-500/20 text-violet-300 border-violet-500/40",
+    "Tienda no declarada": "bg-amber-500/20 text-amber-300 border-amber-500/40",
   };
   const semColor2 = {"verde":"bg-green-400","amarillo":"bg-yellow-400","naranja":"bg-orange-400","rojo":"bg-red-400","gris":"bg-slate-500"};
   const semLabel2 = {"verde":"VERDE","amarillo":"AMARILLO","naranja":"NARANJA","rojo":"ROJO","gris":"GRIS"};
@@ -1525,12 +1792,16 @@ function renderAlertas() {
           <option value="Riesgo" ${alertaFiltroTipo==='Riesgo'?'selected':''}>🟠 Riesgo de eliminación</option>
           <option value="Eliminado" ${alertaFiltroTipo==='Eliminado'?'selected':''}>🔴 Eliminados</option>
           <option value="Huérfana" ${alertaFiltroTipo==='Huérfana'?'selected':''}>👻 Huérfanas (nunca vendieron)</option>
+          <option value="Tienda no declarada" ${alertaFiltroTipo==='Tienda no declarada'?'selected':''}>⚠ Tienda no declarada en GHL</option>
         </select>
         <select id="al-prog" class="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm">
           <option value="Todos" ${alertaFiltroProg==='Todos'?'selected':''}>Todos los programas</option>
           ${PROG_ORDER.map(p => `<option value="${p}" ${alertaFiltroProg===p?'selected':''}>${PROG_SHORT[p]}</option>`).join('')}
         </select>
+        ${paisSelectHTML('al-pais', users, alertaPais)}
         <input id="al-search" type="text" placeholder="Buscar..." class="flex-1 min-w-[200px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500" value="${alertaSearch.replace(/"/g,'&quot;')}">
+        <button id="al-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="al-xlsx" class="text-[11px] px-3 py-2 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
       </div>
     </div>
 
@@ -1560,6 +1831,11 @@ function renderAlertas() {
         <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">👻 Huérfanas</div>
         <div class="text-3xl font-bold mt-1 text-violet-400">${fmt(cnt['Huérfana'])}</div>
         <div class="text-[10px] text-slate-500 mt-1">Nunca han tenido ventas</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">⚠ Tienda no declarada</div>
+        <div class="text-3xl font-bold mt-1 text-amber-400">${fmt(users.filter(u=>u.tiene_no_declarada).length)}</div>
+        <div class="text-[10px] text-slate-500 mt-1">Venden en país sin registrar en GHL</div>
       </div>
       <div class="card p-4">
         <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Total alertas</div>
@@ -1611,14 +1887,44 @@ function renderAlertas() {
 function wireAlertas() {
   const t = document.getElementById('al-tipo');
   const p = document.getElementById('al-prog');
+  const pa = document.getElementById('al-pais');
   const s = document.getElementById('al-search');
   if (t) t.onchange = e => { alertaFiltroTipo = e.target.value; render(); };
   if (p) p.onchange = e => { alertaFiltroProg = e.target.value; render(); };
+  if (pa) pa.onchange = e => { alertaPais = e.target.value; render(); };
   if (s) {
     s.oninput = e => { alertaSearch = e.target.value; render(); };
     s.focus(); s.setSelectionRange(alertaSearch.length, alertaSearch.length);
   }
   document.querySelectorAll('[data-cid]').forEach(row => row.onclick = () => abrirFicha(row.dataset.cid));
+  function _alRows() {
+    const users = baseUsers();
+    const months = DATA.meta.ventana;
+    let filtered = users.filter(u => u.alerta_tipo);
+    if (alertaFiltroTipo !== "Todas") filtered = filtered.filter(u => u.alerta_tipo === alertaFiltroTipo);
+    if (alertaFiltroProg !== "Todos") filtered = filtered.filter(u => u.programa === alertaFiltroProg);
+    if (alertaPais !== "Todos") filtered = filtered.filter(u => paisMatch((u.paises||u.paises_unicos||[]), alertaPais));
+    if (alertaSearch) {
+      const ss = alertaSearch.toLowerCase();
+      filtered = filtered.filter(u => (u.nombre||'').toLowerCase().includes(ss) || (u.email||'').toLowerCase().includes(ss));
+    }
+    if (alertaPais !== "Todos") filtered = filtered.map(u => viewByPais(u, alertaPais));
+    const header = ["Nombre","Email","Teléfono","Programa","Países","Nivel", ...months, "Semáforo","Alerta"];
+    const rows = [header];
+    filtered.forEach(u => rows.push([
+      u.nombre, u.email, u.telefono,
+      PROG_SHORT[u.programa]||u.programa||'Sin programa',
+      (u.paises||u.paises_unicos||[]).join('|'),
+      u.nivel==='Sin clasificar'?'Sin nivel':u.nivel,
+      ...months.map(m => u.ped_mes[m]||0),
+      u.semaforo||'', u.alerta_tipo||''
+    ]));
+    return rows;
+  }
+  const bc = document.getElementById('al-csv');
+  if (bc) bc.onclick = () => downloadCSV("alertas_vip.csv", _alRows());
+  const bx = document.getElementById('al-xlsx');
+  if (bx) bx.onclick = () => _dlXLSX(bx, "alertas_vip.xlsx", _alRows(), "Alertas");
 }
 
 function renderPaises() {
@@ -1738,6 +2044,285 @@ function renderConsulta() {
   </div>`;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// APP MASTER ESCALA · dashboard de pagos (suscripciones + top-ups)
+// Data source: DATA.pagos, alimentado por extraer_pagos.py cada 10 min.
+// ═══════════════════════════════════════════════════════════════════════
+let pagoTipoFilter = "Todos";        // Todos / Top-up / Nueva suscripción
+let pagoProgramaFilter = "Todos";    // Todos / Master Escala / Iniciación Escala / Ambos / Sin programa
+let pagoEstFilter = "Todos";         // Todos / Sí / No
+let pagoSearch = "";
+let pagoSortCol = "fecha";           // fecha | neto_usd | bruto_usd | creditos | email | descripcion
+let pagoSortDir = "desc";
+let pagoMesDesde = null;
+let pagoMesHasta = null;
+
+function pagoMes(iso){ return (iso || "").slice(0,7); }
+function pagoFmtDate(iso){ return (iso || "").slice(0,10); }
+function pagoUSD(n){ return "$" + (n||0).toLocaleString("es-CO", {minimumFractionDigits:2, maximumFractionDigits:2}); }
+
+function pagoFilterList() {
+  let list = (DATA.pagos || []).slice();
+  if (pagoTipoFilter !== "Todos") list = list.filter(p => p.tipo === pagoTipoFilter);
+  if (pagoProgramaFilter !== "Todos") list = list.filter(p => (p.programa || "Sin programa") === pagoProgramaFilter);
+  if (pagoEstFilter === "Sí")  list = list.filter(p => p.estudiante === true);
+  if (pagoEstFilter === "No")  list = list.filter(p => p.estudiante === false);
+  if (pagoMesDesde) list = list.filter(p => pagoMes(p.fecha) >= pagoMesDesde);
+  if (pagoMesHasta) list = list.filter(p => pagoMes(p.fecha) <= pagoMesHasta);
+  if (pagoSearch) {
+    const s = pagoSearch.toLowerCase();
+    list = list.filter(p => (p.email||"").toLowerCase().includes(s)
+                          || (p.nombre||"").toLowerCase().includes(s)
+                          || (p.descripcion||"").toLowerCase().includes(s)
+                          || (p.stripe_charge_id||"").toLowerCase().includes(s));
+  }
+  const dir = pagoSortDir === "asc" ? 1 : -1;
+  list.sort((a,b) => {
+    const va = a[pagoSortCol], vb = b[pagoSortCol];
+    if (typeof va === "number" && typeof vb === "number") return dir * (va - vb);
+    return dir * String(va||"").localeCompare(String(vb||""));
+  });
+  return list;
+}
+
+function pagoSortArrow(col){
+  if (pagoSortCol !== col) return " <span class='text-slate-600'>⇅</span>";
+  return pagoSortDir === "asc" ? " ▲" : " ▼";
+}
+
+function renderPagosDashboard() {
+  const all = DATA.pagos || [];
+  if (all.length === 0) {
+    return `<div class="card p-8 text-center">
+      <h2 class="text-lg neon-cyan mb-3">💰 App Master Escala</h2>
+      <p class="text-slate-400">Aún no hay pagos registrados en <code>pagos.json</code>.<br>
+      El backfill inicial puede estar corriendo. Se actualiza cada 10 min con la rutina
+      <code>extraer-pagos</code>.</p></div>`;
+  }
+  const list = pagoFilterList();
+  const meses = [...new Set(all.map(p => pagoMes(p.fecha)))].filter(Boolean).sort();
+  const programas = ["Todos","Master Escala","Iniciación Escala","Ambos","Sin programa"];
+  const tipos = ["Todos","Top-up","Nueva suscripción"];
+  const estOpts = ["Todos","Sí","No"];
+  // Totales sobre la lista filtrada
+  const tot_pagos = list.length;
+  const tot_creditos = list.reduce((s,p) => s + (p.creditos||0), 0);
+  const tot_bruto = list.reduce((s,p) => s + (p.bruto_usd||0), 0);
+  const tot_comision = list.reduce((s,p) => s + (p.comision_usd||0), 0);
+  const tot_neto = list.reduce((s,p) => s + (p.neto_usd||0), 0);
+  // Distribución por tipo (para % de mix)
+  const nSub = list.filter(p => p.tipo === "Nueva suscripción").length;
+  const nTop = list.filter(p => p.tipo === "Top-up").length;
+  return `
+    <div class="card p-4 mb-4">
+      <h2 class="text-base font-bold neon-cyan mb-1">💰 App Master Escala — Pagos</h2>
+      <div class="text-xs text-slate-500">Transacciones registradas como notas GHL <code>Pago recibido App Master Escala</code>. Datos parseados por <code>extraer_pagos.py</code> · actualizado cada 10 min.</div>
+    </div>
+
+    <!-- STAT CARDS · reactivos al filtro -->
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+      ${statCard("Total transacciones", tot_pagos, `${nSub} suscripciones · ${nTop} top-ups`, "neon-cyan")}
+      ${statCard("Créditos vendidos", tot_creditos, "En transacciones filtradas", "neon-violet")}
+      ${statCard("Bruto USD", pagoUSD(tot_bruto), "Antes de comisión Stripe", "neon-green")}
+      ${statCard("Comisión Stripe", pagoUSD(tot_comision), `${tot_bruto>0?(tot_comision/tot_bruto*100).toFixed(1):0}% del bruto`, "neon-yellow")}
+      ${statCard("Neto USD", pagoUSD(tot_neto), "Después de Stripe", "neon-pink")}
+    </div>
+
+    <!-- GRÁFICO MENSUAL -->
+    <div class="card p-4 mb-4">
+      <div class="flex justify-between items-baseline mb-2">
+        <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Ingresos por mes (neto USD)</h3>
+        <div class="text-[10px] text-slate-500">Barras apiladas · verde=suscripciones · violeta=top-ups</div>
+      </div>
+      <div style="height:260px"><canvas id="pagos-chart"></canvas></div>
+    </div>
+
+    <!-- FILTROS -->
+    <div class="card p-4 mb-4">
+      <div class="flex flex-wrap items-center gap-3 mb-3">
+        <input id="pago-search" type="text" placeholder="Buscar por email, nombre, plan o Stripe charge ID..."
+               class="flex-1 min-w-[260px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
+               value="${pagoSearch.replace(/"/g,'&quot;')}">
+        <button id="pago-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="pago-xlsx" class="text-[11px] px-3 py-2 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Tipo:</div>
+        ${tipos.map(t => `<button data-pagotipo="${t}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${pagoTipoFilter===t?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${t}</button>`).join('')}
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Programa:</div>
+        ${programas.map(p => `<button data-pagoprog="${p}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${pagoProgramaFilter===p?'bg-violet-600/30 text-violet-200 border border-violet-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${p==='Todos'?'Todos':(PROG_SHORT[p]||p)}</button>`).join('')}
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Estudiante:</div>
+        ${estOpts.map(e => `<button data-pagoest="${e}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${pagoEstFilter===e?'bg-emerald-600/30 text-emerald-200 border border-emerald-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${e}</button>`).join('')}
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Mes:</div>
+        <select id="pago-desde" class="bg-black/40 border border-white/10 rounded-lg px-2 py-1.5 text-xs">
+          <option value="">Desde (todos)</option>
+          ${meses.map(m => `<option value="${m}" ${pagoMesDesde===m?'selected':''}>${m}</option>`).join('')}
+        </select>
+        <select id="pago-hasta" class="bg-black/40 border border-white/10 rounded-lg px-2 py-1.5 text-xs">
+          <option value="">Hasta (todos)</option>
+          ${meses.map(m => `<option value="${m}" ${pagoMesHasta===m?'selected':''}>${m}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+
+    <!-- TABLA -->
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 mb-2">Mostrando ${list.length} de ${all.length} transacciones</div>
+      <div class="overflow-x-auto scrollable">
+        <table class="w-full text-xs">
+          <thead class="text-[10px] text-slate-500 uppercase tracking-wider border-b border-white/10 sticky top-0 bg-[#06091a] z-10">
+            <tr>
+              <th data-pagosort="fecha" class="text-left py-2 cursor-pointer hover:text-cyan-300 select-none">Fecha${pagoSortArrow('fecha')}</th>
+              <th data-pagosort="email" class="text-left cursor-pointer hover:text-cyan-300 select-none">Email${pagoSortArrow('email')}</th>
+              <th class="text-left">Nombre</th>
+              <th class="text-center">Estudiante</th>
+              <th class="text-center">Programa</th>
+              <th class="text-center">Tipo</th>
+              <th data-pagosort="descripcion" class="text-left cursor-pointer hover:text-cyan-300 select-none">Plan${pagoSortArrow('descripcion')}</th>
+              <th data-pagosort="creditos" class="text-right cursor-pointer hover:text-cyan-300 select-none">Créditos${pagoSortArrow('creditos')}</th>
+              <th data-pagosort="bruto_usd" class="text-right cursor-pointer hover:text-cyan-300 select-none">Bruto USD${pagoSortArrow('bruto_usd')}</th>
+              <th class="text-right">Comisión USD</th>
+              <th data-pagosort="neto_usd" class="text-right cursor-pointer hover:text-cyan-300 select-none">Neto USD${pagoSortArrow('neto_usd')}</th>
+              <th class="text-left">Stripe charge ID</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.slice(0, 2000).map(p => `
+              <tr class="hover-row border-b border-white/5">
+                <td class="py-2 text-slate-300 font-mono">${pagoFmtDate(p.fecha)}</td>
+                <td class="text-slate-300">${p.email||'—'}</td>
+                <td class="text-slate-200">${tc(p.nombre)||'—'}</td>
+                <td class="text-center">${p.estudiante ? '<span class="pill bg-emerald-500/20 text-emerald-300 border-emerald-500/40">Sí</span>' : '<span class="text-slate-600">No</span>'}</td>
+                <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[p.programa]||p.programa||'—'}</span></td>
+                <td class="text-center"><span class="pill ${p.tipo==='Top-up'?'bg-violet-500/20 text-violet-300 border-violet-500/40':'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'}">${p.tipo}</span></td>
+                <td class="text-slate-300">${p.descripcion||'—'}</td>
+                <td class="text-right font-mono text-slate-200">${fmt(p.creditos)}</td>
+                <td class="text-right font-mono text-slate-200">${pagoUSD(p.bruto_usd)}</td>
+                <td class="text-right font-mono text-orange-300">${pagoUSD(p.comision_usd)}</td>
+                <td class="text-right font-mono font-semibold text-emerald-300">${pagoUSD(p.neto_usd)}</td>
+                <td class="text-left font-mono text-slate-400">${p.stripe_charge_id ? tc(p.stripe_charge_id) : '—'}</td>
+              </tr>`).join('')}
+            ${list.length > 2000 ? `<tr><td colspan="12" class="text-center text-slate-500 py-3">... y ${list.length-2000} más (usa CSV para ver todos)</td></tr>` : ''}
+            ${list.length === 0 ? `<tr><td colspan="12" class="text-center text-slate-500 py-6">— sin resultados —</td></tr>` : ''}
+          </tbody>
+          <tfoot class="border-t-2 border-cyan-500/30 bg-cyan-500/5 sticky bottom-0">
+            <tr class="font-semibold">
+              <td colspan="7" class="py-2 text-cyan-300">TOTAL (${tot_pagos})</td>
+              <td class="text-right font-mono text-slate-100">${fmt(tot_creditos)}</td>
+              <td class="text-right font-mono text-slate-100">${pagoUSD(tot_bruto)}</td>
+              <td class="text-right font-mono text-orange-200">${pagoUSD(tot_comision)}</td>
+              <td class="text-right font-mono text-emerald-200">${pagoUSD(tot_neto)}</td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function wirePagosDashboard() {
+  document.querySelectorAll('[data-pagotipo]').forEach(b => b.onclick = () => { pagoTipoFilter = b.dataset.pagotipo; render(); });
+  document.querySelectorAll('[data-pagoprog]').forEach(b => b.onclick = () => { pagoProgramaFilter = b.dataset.pagoprog; render(); });
+  document.querySelectorAll('[data-pagoest]').forEach(b => b.onclick = () => { pagoEstFilter = b.dataset.pagoest; render(); });
+  document.querySelectorAll('th[data-pagosort]').forEach(th => th.onclick = () => {
+    const col = th.dataset.pagosort;
+    if (pagoSortCol === col) pagoSortDir = pagoSortDir === 'asc' ? 'desc' : 'asc';
+    else { pagoSortCol = col; pagoSortDir = 'desc'; }
+    render();
+  });
+  const inp = document.getElementById('pago-search');
+  if (inp) {
+    inp.oninput = e => { pagoSearch = e.target.value; render(); };
+    inp.focus(); inp.setSelectionRange(pagoSearch.length, pagoSearch.length);
+  }
+  const sd = document.getElementById('pago-desde');
+  const sh = document.getElementById('pago-hasta');
+  if (sd) sd.onchange = e => { pagoMesDesde = e.target.value || null; render(); };
+  if (sh) sh.onchange = e => { pagoMesHasta = e.target.value || null; render(); };
+  // Helper: arma las filas para export (mismo formato para CSV y XLSX)
+  function _pagoExportRows() {
+    const list = pagoFilterList();
+    // Fecha en hora Colombia (formato "YYYY-MM-DD HH:MM:SS").
+    const fdate = (iso) => { if(!iso) return ""; const d=new Date(iso); if(isNaN(d)) return String(iso);
+      return new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Bogota',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d).replace('T',' '); };
+    // Tipo con las etiquetas del reporte de compras.
+    const tlabel = (p) => { const tr=(p.tipo_raw||'').toLowerCase();
+      return tr==='topup'?'Recarga de créditos':tr==='subscription'?'Plan (suscripción)':tr==='renewal'?'Renovación de plan':(p.tipo||''); };
+    // Descripción tipo "Top-up/Suscripción/Renovación Stripe {código} — {n} créditos".
+    const descr = (p) => { const d=(p.descripcion||'').trim(), dl=d.toLowerCase();
+      if(dl.startsWith('top-up stripe')||dl.startsWith('suscripción stripe')||dl.startsWith('renovación stripe')) return d;
+      const tr=(p.tipo_raw||'').toLowerCase(), cred=p.creditos||0;
+      const pref={topup:'Top-up Stripe',subscription:'Suscripción Stripe',renewal:'Renovación Stripe'}[tr];
+      if(!pref) return d; const code=d.toLowerCase().replace(/ /g,'_').replace(/\+/g,'_');
+      return code?(pref+' '+code+' — '+cred+' créditos'):(pref+' — '+cred+' créditos'); };
+    const rows = [["Fecha","Correo","Nombre","Teléfono","Tipo","Descripción","Créditos","Pagado (USD)","Comisión Stripe (USD)","Neto recibido (USD)","Stripe charge ID"]];
+    list.forEach(p => rows.push([
+      fdate(p.fecha), p.email||'', p.nombre||'', p.telefono||'',
+      tlabel(p), descr(p), p.creditos||0, p.bruto_usd||0, p.comision_usd||0, p.neto_usd||0, p.stripe_charge_id||''
+    ]));
+    return rows;
+  }
+  // Nombre de archivo con la fecha del día (hora Colombia): "... - YYYY-MM-DD.ext".
+  const _pagoFname = (ext) => "Master Escala - Compras (planes y recargas) - " +
+    new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Bogota',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()) + "." + ext;
+  const btn = document.getElementById('pago-csv');
+  if (btn) btn.onclick = () => downloadCSV(_pagoFname('csv'), _pagoExportRows());
+  const btnX = document.getElementById('pago-xlsx');
+  if (btnX) btnX.onclick = () => {
+    btnX.disabled = true; const orig = btnX.textContent; btnX.textContent = 'Generando…';
+    Promise.resolve()
+      .then(() => downloadXLSX(_pagoFname('xlsx'), _pagoExportRows(), "Compras"))
+      .finally(() => { setTimeout(() => { btnX.disabled = false; btnX.textContent = orig; }, 1500); });
+  };
+}
+
+let _pagosChart = null;
+function drawPagosChart() {
+  const canvas = document.getElementById('pagos-chart');
+  if (!canvas) return;
+  if (_pagosChart) { _pagosChart.destroy(); _pagosChart = null; }
+  const list = pagoFilterList();
+  // Agrupar por mes + tipo
+  const byMonth = {};
+  list.forEach(p => {
+    const m = pagoMes(p.fecha);
+    if (!m) return;
+    if (!byMonth[m]) byMonth[m] = { "Nueva suscripción":0, "Top-up":0 };
+    byMonth[m][p.tipo] = (byMonth[m][p.tipo]||0) + (p.neto_usd||0);
+  });
+  const labels = Object.keys(byMonth).sort();
+  const dataSub = labels.map(m => +(byMonth[m]["Nueva suscripción"] || 0).toFixed(2));
+  const dataTop = labels.map(m => +(byMonth[m]["Top-up"] || 0).toFixed(2));
+  _pagosChart = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'Nueva suscripción', data: dataSub, backgroundColor: 'rgba(34,197,94,.75)', borderRadius: 4 },
+        { label: 'Top-up',            data: dataTop, backgroundColor: 'rgba(167,139,250,.75)', borderRadius: 4 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#cbd5e1' } },
+        tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toFixed(2) } },
+      },
+      scales: {
+        x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,.05)' } },
+        y: { stacked: true, ticks: { color: '#94a3b8', callback: v => '$' + v }, grid: { color: 'rgba(255,255,255,.05)' } },
+      },
+    }
+  });
+}
+
 function render() {
   const main = document.getElementById("main-content");
   switch (currentTab) {
@@ -1754,6 +2339,8 @@ function render() {
     // Configuración
     case "reglas":  main.innerHTML = renderReglas(); break;
     case "consulta":main.innerHTML = renderConsulta(); wireConsulta(); break;
+    // App Master Escala
+    case "pagos_dashboard": main.innerHTML = renderPagosDashboard(); wirePagosDashboard(); drawPagosChart(); break;
   }
 }
 
@@ -1796,8 +2383,10 @@ function renderOtrosResumen() {
 // MÉTRICAS · 3 vistas independientes del VIP
 // ============================================================
 let metSinVipProg   = "Todos";
+let metSinVipPais   = "Todos";
 let metSinVipSearch = "";
 let metProgFilter   = "Todos";
+let metProgPais     = "Todos";
 let metProgSearch   = "";
 let metDropiVentas  = "Todos";   // "Todos" | "Con ventas" | "Sin ventas"
 let metDropiSearch  = "";
@@ -1806,6 +2395,7 @@ let metDropiCountry = "Todos";
 let estSubtab  = "vip";       // "vip" | "no_vip"
 let estProg    = "Todos";     // "Todos" | "Master Escala" | "Iniciación Escala" | "Ambos"
 let estVentas  = "Todos";     // "Todos" | "Con ventas" | "Sin ventas"
+let estPais    = "Todos";
 let estSearch  = "";
 
 function downloadCSV(filename, rows) {
@@ -1822,27 +2412,67 @@ function downloadCSV(filename, rows) {
   document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-// ---------- VISTA 1: No están en Comunidad VIP ----------
-// Selección múltiple para envío de correos
-let metSinVipSelected = new Set();
-let serverReady = null;   // se detecta al primer render
-let serverConfig = null;
-
-function detectarServidor() {
-  if (location.protocol !== 'http:' && location.protocol !== 'https:') {
-    serverReady = false;
-    return Promise.resolve();
-  }
-  return fetch('/api/config').then(r => r.json()).then(cfg => {
-    serverConfig = cfg;
-    serverReady = !!cfg.ready;
-  }).catch(() => { serverReady = false; });
+// XLSX vía SheetJS. Se carga lazy (solo al primer click) para no inflar el
+// dashboard inicial. Usa la versión Community 0.18.5 estable desde cdnjs.
+let _xlsxLoading = null;
+function ensureXLSX() {
+  if (typeof XLSX !== 'undefined') return Promise.resolve();
+  if (_xlsxLoading) return _xlsxLoading;
+  _xlsxLoading = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('No se pudo cargar SheetJS'));
+    document.head.appendChild(s);
+  });
+  return _xlsxLoading;
+}
+// Wrapper: deshabilita el botón mientras se carga SheetJS y genera el archivo.
+// Usar en el onclick: _dlXLSX(btn, "archivo.xlsx", rowsFn(), "Sheet")
+function _dlXLSX(btn, filename, rows, sheetName) {
+  if (!btn) return downloadXLSX(filename, rows, sheetName);
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Generando…';
+  Promise.resolve()
+    .then(() => downloadXLSX(filename, rows, sheetName))
+    .finally(() => setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 1200));
 }
 
+// filename: nombre incluyendo .xlsx. rows: array de arrays (misma forma que downloadCSV).
+// sheetName: opcional (default "Datos"). numericCols: opcional, indices de columnas
+// a formatear como número (0-based, sin contar el header).
+function downloadXLSX(filename, rows, sheetName, numericCols) {
+  ensureXLSX().then(() => {
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    // Ancho automático razonable por columna (basado en longitud del header + max
+    // de las primeras 200 filas).
+    const nCols = rows[0] ? rows[0].length : 0;
+    const widths = [];
+    for (let c = 0; c < nCols; c++) {
+      let max = String(rows[0][c] || '').length;
+      for (let r = 1; r < Math.min(rows.length, 201); r++) {
+        const v = rows[r] && rows[r][c];
+        const s = (v == null ? '' : String(v));
+        if (s.length > max) max = s.length;
+      }
+      widths.push({ wch: Math.min(Math.max(max + 2, 8), 50) });
+    }
+    ws['!cols'] = widths;
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, (sheetName || 'Datos').slice(0, 31));
+    XLSX.writeFile(wb, filename);
+  }).catch(err => {
+    alert('No se pudo generar el XLSX: ' + err.message + '. Revisa tu conexión a internet.');
+  });
+}
+
+// ---------- VISTA 1: No están en Comunidad VIP ----------
 function renderMetSinVIP() {
   const all = DATA.metricas.sin_comunidad_vip || [];
   let list = all.slice();
   if (metSinVipProg !== "Todos") list = list.filter(u => u.programa === metSinVipProg);
+  if (metSinVipPais !== "Todos") list = list.filter(u => paisMatch((u.paises||[]), metSinVipPais));
   if (metSinVipSearch) {
     const s = metSinVipSearch.toLowerCase();
     list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
@@ -1853,36 +2483,13 @@ function renderMetSinVIP() {
     "Iniciación Escala": all.filter(u => u.programa==="Iniciación Escala").length,
     "Ambos": all.filter(u => u.programa==="Ambos").length,
   };
-  // ¿Cuántos visibles tienen email válido?
   const listConEmail = list.filter(u => u.email && u.email.includes('@'));
-  // ¿Cuántos seleccionados están en la lista filtrada actual?
-  const selVisible = listConEmail.filter(u => metSinVipSelected.has(u.cid)).length;
-  const allChecked = listConEmail.length > 0 && selVisible === listConEmail.length;
-
-  const isLocal = (location.protocol === 'http:' || location.protocol === 'https:');
-  const banner = !isLocal
-    ? `<div class="card p-3 mb-3 border-amber-500/30 bg-amber-500/5">
-         <div class="text-xs text-amber-300 font-semibold mb-1">⚠ Servidor local no detectado</div>
-         <div class="text-[11px] text-amber-200/70 leading-relaxed">
-           Para enviar correos arranca el servidor:<br>
-           <code class="text-amber-100">cd "$(pwd)" && python3 servidor_local.py</code><br>
-           Luego abre <code class="text-amber-100">http://localhost:8888</code> en lugar de <code>file://</code>.
-         </div>
-       </div>`
-    : (serverReady === false
-      ? `<div class="card p-3 mb-3 border-red-500/30 bg-red-500/5">
-           <div class="text-xs text-red-300 font-semibold mb-1">⚠ Servidor local detectado, pero falta configurar Gmail</div>
-           <div class="text-[11px] text-red-200/70">Edita <code>.env</code> y agrega <code>GMAIL_FROM</code> y <code>GMAIL_APP_PASSWORD</code>. Reinicia el servidor.</div>
-         </div>`
-      : '');
 
   return `
     <div class="card p-4 mb-4">
       <h2 class="text-base font-bold neon-cyan mb-1">👥 No están en Comunidad VIP</h2>
       <div class="text-xs text-slate-500">Contactos con tag <code>escala</code> o <code>iniciacion</code> en GHL que NO tienen el tag <code>comunidad vip new</code>.</div>
     </div>
-
-    ${banner}
 
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
       ${statCard("Total sin VIP new", cnt["Todos"], "Master o Iniciación sin la etiqueta", "neon-cyan")}
@@ -1896,7 +2503,9 @@ function renderMetSinVIP() {
         <input id="met1-search" type="text" placeholder="Buscar por nombre o email..."
                class="flex-1 min-w-[260px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
                value="${metSinVipSearch.replace(/"/g,'&quot;')}">
-        <button id="met1-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ Descargar CSV</button>
+        ${paisSelectHTML('met1-pais', all, metSinVipPais)}
+        <button id="met1-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="met1-xlsx" class="text-[11px] px-3 py-2 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Programa:</div>
@@ -1909,40 +2518,28 @@ function renderMetSinVIP() {
     <div class="card p-4">
       <div class="flex justify-between items-center mb-2">
         <div class="text-xs text-slate-500">Mostrando ${list.length} de ${all.length} · ${listConEmail.length} con email</div>
-        <div class="flex items-center gap-2">
-          ${metSinVipSelected.size > 0
-            ? `<span class="text-xs text-cyan-300 font-semibold">${metSinVipSelected.size} seleccionado${metSinVipSelected.size!==1?'s':''}</span>
-               <button id="met1-clear" class="text-[10px] px-2 py-1 rounded text-slate-400 hover:text-slate-200">Limpiar</button>
-               <button id="met1-send" class="text-[11px] px-3 py-1.5 rounded-lg bg-green-600/30 text-green-200 border border-green-500/40 hover:bg-green-600/40 font-semibold">✉ Enviar a ${metSinVipSelected.size}</button>`
-            : `<span class="text-[11px] text-slate-600">Selecciona contactos para enviar correos</span>`
-          }
-        </div>
       </div>
       <div class="overflow-x-auto scrollable">
         <table class="w-full text-xs">
           <thead class="text-[10px] text-slate-500 uppercase tracking-wider border-b border-white/10 sticky top-0 bg-[#06091a] z-10">
             <tr>
-              <th class="text-left py-2 w-8"><input type="checkbox" id="met1-checkall" ${allChecked?'checked':''} title="Seleccionar visibles con email"></th>
               <th class="text-left">Nombre</th>
               <th class="text-left">Email</th>
               <th class="text-left">Teléfono</th>
               <th class="text-center">Programa</th>
+              <th class="text-left">País</th>
               <th class="text-left">Contact ID</th>
             </tr>
           </thead>
           <tbody>
             ${list.map(u => {
-              const hasEmail = u.email && u.email.includes('@');
-              const checked = metSinVipSelected.has(u.cid);
               return `
-              <tr class="hover-row border-b border-white/5 ${checked?'bg-cyan-500/5':''}">
-                <td class="py-2">${hasEmail
-                  ? `<input type="checkbox" data-met1cid="${u.cid}" ${checked?'checked':''}>`
-                  : `<span title="Sin email — no se puede enviar" class="text-slate-700">—</span>`}</td>
+              <tr class="hover-row border-b border-white/5">
                 <td class="text-slate-200">${tc(u.nombre)||'—'}</td>
                 <td class="text-slate-300">${u.email||'<span class="text-slate-600">sin email</span>'}</td>
                 <td class="text-slate-400 font-mono">${u.telefono||'—'}</td>
                 <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[u.programa]||u.programa}</span></td>
+                <td class="text-[14px]">${(u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—'}</td>
                 <td class="text-slate-500 font-mono text-[10px]">${u.cid}</td>
               </tr>`;
             }).join('')}
@@ -1955,214 +2552,30 @@ function renderMetSinVIP() {
 }
 function wireMetSinVIP() {
   document.querySelectorAll('[data-met1prog]').forEach(b => b.onclick = () => { metSinVipProg = b.dataset.met1prog; render(); });
+  const ps = document.getElementById('met1-pais');
+  if (ps) ps.onchange = e => { metSinVipPais = e.target.value; render(); };
   const inp = document.getElementById('met1-search');
   if (inp) {
     inp.oninput = e => { metSinVipSearch = e.target.value; render(); };
     inp.focus(); inp.setSelectionRange(metSinVipSearch.length, metSinVipSearch.length);
   }
+  function _met1Rows() {
+    const all = DATA.metricas.sin_comunidad_vip || [];
+    let list = all.slice();
+    if (metSinVipProg !== "Todos") list = list.filter(u => u.programa === metSinVipProg);
+    if (metSinVipPais !== "Todos") list = list.filter(u => paisMatch((u.paises||[]), metSinVipPais));
+    if (metSinVipSearch) {
+      const s = metSinVipSearch.toLowerCase();
+      list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
+    }
+    const rows = [["Nombre","Email","Teléfono","Programa","Países","Contact ID"]];
+    list.forEach(u => rows.push([u.nombre,u.email,u.telefono,u.programa,(u.paises||[]).join('|'),u.cid]));
+    return rows;
+  }
   const btn = document.getElementById('met1-csv');
-  if (btn) btn.onclick = () => {
-    const all = DATA.metricas.sin_comunidad_vip || [];
-    let list = all.slice();
-    if (metSinVipProg !== "Todos") list = list.filter(u => u.programa === metSinVipProg);
-    if (metSinVipSearch) {
-      const s = metSinVipSearch.toLowerCase();
-      list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
-    }
-    const rows = [["Nombre","Email","Teléfono","Programa","Contact ID"]];
-    list.forEach(u => rows.push([u.nombre,u.email,u.telefono,u.programa,u.cid]));
-    downloadCSV("no_estan_en_comunidad_vip.csv", rows);
-  };
-  // Checkboxes individuales
-  document.querySelectorAll('[data-met1cid]').forEach(cb => cb.onclick = e => {
-    const cid = e.target.dataset.met1cid;
-    if (e.target.checked) metSinVipSelected.add(cid); else metSinVipSelected.delete(cid);
-    render();
-  });
-  // Check all (solo visibles con email)
-  const ca = document.getElementById('met1-checkall');
-  if (ca) ca.onclick = e => {
-    const all = DATA.metricas.sin_comunidad_vip || [];
-    let list = all.slice();
-    if (metSinVipProg !== "Todos") list = list.filter(u => u.programa === metSinVipProg);
-    if (metSinVipSearch) {
-      const s = metSinVipSearch.toLowerCase();
-      list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
-    }
-    const visConEmail = list.filter(u => u.email && u.email.includes('@'));
-    if (e.target.checked) visConEmail.forEach(u => metSinVipSelected.add(u.cid));
-    else visConEmail.forEach(u => metSinVipSelected.delete(u.cid));
-    render();
-  };
-  const clearBtn = document.getElementById('met1-clear');
-  if (clearBtn) clearBtn.onclick = () => { metSinVipSelected.clear(); render(); };
-  const sendBtn = document.getElementById('met1-send');
-  if (sendBtn) sendBtn.onclick = () => abrirModalEnvio();
-}
-
-// ============================================================
-// MODAL DE ENVÍO DE CORREO
-// ============================================================
-function abrirModalEnvio() {
-  const isLocal = (location.protocol === 'http:' || location.protocol === 'https:');
-  if (!isLocal) {
-    alert("Para enviar correos arranca el servidor local:" + String.fromCharCode(10,10) +
-          "python3 servidor_local.py" + String.fromCharCode(10,10) +
-          "Luego abre http://localhost:8888");
-    return;
-  }
-  if (serverReady === false) {
-    alert("El servidor está corriendo pero faltan credenciales de Gmail en .env (GMAIL_FROM y GMAIL_APP_PASSWORD). Edita el .env y reinicia el servidor.");
-    return;
-  }
-  const all = DATA.metricas.sin_comunidad_vip || [];
-  const selectedContacts = all.filter(u => metSinVipSelected.has(u.cid) && u.email && u.email.includes('@'));
-  if (!selectedContacts.length) { alert("No hay contactos válidos seleccionados."); return; }
-
-  const draft = (function(){
-    try { return JSON.parse(localStorage.getItem('email_draft_v1')||'{}'); } catch(e) { return {}; }
-  })();
-  const defSubject = draft.subject || "Te invitamos a la Comunidad VIP";
-  const _NL = String.fromCharCode(10);
-  const defBody = draft.body || [
-    "Hola {nombre},",
-    "",
-    "Notamos que ya formas parte de {programa} pero aún no te hemos sumado a la Comunidad VIP.",
-    "",
-    "Si quieres conocer los beneficios y unirte, respóndenos a este correo.",
-    "",
-    "Saludos,",
-    "Iván Caicedo"
-  ].join(_NL);
-
-  const modal = document.getElementById('envio-modal');
-  modal.classList.remove('hidden');
-  document.getElementById('envio-content').innerHTML = `
-    <div class="card p-5 mb-3">
-      <h3 class="text-lg font-bold neon-cyan mb-1">✉ Enviar correo</h3>
-      <div class="text-xs text-slate-400">A <span class="text-cyan-300 font-semibold">${selectedContacts.length}</span> destinatario${selectedContacts.length!==1?'s':''} · From: <span class="text-slate-300">${serverConfig?.from_email||'(servidor)'}</span></div>
-    </div>
-
-    <div class="card p-5 mb-3">
-      <label class="text-[10px] uppercase tracking-wider text-slate-500 block mb-1">Asunto</label>
-      <input id="env-subject" type="text" value="${defSubject.replace(/"/g,'&quot;')}"
-             class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500 mb-4">
-
-      <div class="flex justify-between items-baseline mb-1">
-        <label class="text-[10px] uppercase tracking-wider text-slate-500">Cuerpo del mensaje</label>
-        <div class="text-[10px] text-slate-500">Variables: <code class="text-cyan-400">{nombre}</code> <code class="text-cyan-400">{email}</code> <code class="text-cyan-400">{programa}</code> <code class="text-cyan-400">{telefono}</code></div>
-      </div>
-      <textarea id="env-body" rows="10"
-                class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500 font-mono text-xs">${defBody}</textarea>
-      <div class="text-[10px] text-slate-500 mt-1">Tip: puedes usar HTML básico (&lt;br&gt;, &lt;b&gt;, &lt;a href&gt;...). Los saltos de línea se respetan automáticamente.</div>
-    </div>
-
-    <div class="card p-4 mb-3">
-      <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-2">👁 Vista previa con el primer destinatario</div>
-      <div class="bg-black/30 border border-white/5 rounded-lg p-3 text-xs" id="env-preview"></div>
-    </div>
-
-    <div id="env-progress" class="hidden card p-4 mb-3">
-      <div class="text-[11px] uppercase tracking-wider text-slate-500 mb-2">Enviando...</div>
-      <div class="w-full bg-black/40 rounded-full h-3 overflow-hidden mb-2">
-        <div id="env-bar" class="h-full bg-gradient-to-r from-cyan-500 to-green-500 transition-all" style="width:0%"></div>
-      </div>
-      <div id="env-log" class="text-[11px] font-mono text-slate-400 max-h-48 overflow-y-auto"></div>
-    </div>
-
-    <div class="flex justify-end gap-2">
-      <button id="env-cancel" class="cat-btn">Cancelar</button>
-      <button id="env-send" class="cat-btn active">✉ Enviar a ${selectedContacts.length}</button>
-    </div>
-  `;
-
-  // Helpers
-  const aplicarVars = (txt, u) => txt
-    .replace(/\{nombre\}/g, tc(u.nombre)||'')
-    .replace(/\{email\}/g, u.email||'')
-    .replace(/\{programa\}/g, PROG_SHORT[u.programa]||u.programa||'')
-    .replace(/\{telefono\}/g, u.telefono||'');
-
-  const txtToHtml = (txt) => {
-    // si NO contiene tags, convertir saltos de línea a <br>
-    if (/<[a-z][^>]*>/i.test(txt)) return txt;
-    return txt.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').split(String.fromCharCode(10)).join('<br>');
-  };
-
-  const actualizarPreview = () => {
-    const subj = document.getElementById('env-subject').value;
-    const body = document.getElementById('env-body').value;
-    const u = selectedContacts[0];
-    document.getElementById('env-preview').innerHTML = `
-      <div class="text-slate-500 text-[10px] mb-1">A: <span class="text-slate-300">${u.email}</span></div>
-      <div class="text-slate-500 text-[10px] mb-2">Asunto: <span class="text-slate-200 font-semibold">${aplicarVars(subj,u).replace(/</g,'&lt;')}</span></div>
-      <div class="border-t border-white/5 pt-2 text-slate-300">${txtToHtml(aplicarVars(body, u))}</div>
-    `;
-  };
-  actualizarPreview();
-  document.getElementById('env-subject').oninput = actualizarPreview;
-  document.getElementById('env-body').oninput = actualizarPreview;
-
-  document.getElementById('env-cancel').onclick = cerrarModalEnvio;
-
-  document.getElementById('env-send').onclick = async () => {
-    const subj = document.getElementById('env-subject').value.trim();
-    const body = document.getElementById('env-body').value.trim();
-    if (!subj || !body) { alert("Asunto y cuerpo son obligatorios."); return; }
-    // Guardar borrador
-    try { localStorage.setItem('email_draft_v1', JSON.stringify({subject:subj, body:body})); } catch(e){}
-
-    // Confirmar
-    if (!confirm(`¿Enviar este correo a ${selectedContacts.length} destinatario${selectedContacts.length!==1?'s':''}?`)) return;
-
-    document.getElementById('env-send').disabled = true;
-    document.getElementById('env-cancel').disabled = true;
-    document.getElementById('env-progress').classList.remove('hidden');
-    const bar = document.getElementById('env-bar');
-    const logEl = document.getElementById('env-log');
-    let ok = 0, fail = 0;
-    for (let i = 0; i < selectedContacts.length; i++) {
-      const u = selectedContacts[i];
-      const subjFinal = aplicarVars(subj, u);
-      const bodyFinal = txtToHtml(aplicarVars(body, u));
-      try {
-        const resp = await fetch('/api/send-email', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({to: u.email, subject: subjFinal, body_html: bodyFinal})
-        });
-        const j = await resp.json();
-        if (resp.ok) {
-          ok++;
-          logEl.innerHTML += `<div class="text-green-400">✓ ${u.email}</div>`;
-        } else {
-          fail++;
-          logEl.innerHTML += `<div class="text-red-400">✗ ${u.email} — ${j.error||'error'}</div>`;
-        }
-      } catch(e) {
-        fail++;
-        logEl.innerHTML += `<div class="text-red-400">✗ ${u.email} — ${e.message}</div>`;
-      }
-      bar.style.width = (((i+1)/selectedContacts.length)*100).toFixed(1)+'%';
-      logEl.scrollTop = logEl.scrollHeight;
-      // pequeña pausa para no saturar
-      await new Promise(r => setTimeout(r, 300));
-    }
-    logEl.innerHTML += `<div class="mt-2 pt-2 border-t border-white/10 text-cyan-300 font-semibold">Listo · ${ok} enviados, ${fail} fallidos</div>`;
-    document.getElementById('env-send').innerHTML = 'Cerrar';
-    document.getElementById('env-send').disabled = false;
-    document.getElementById('env-send').onclick = () => {
-      cerrarModalEnvio();
-      if (ok > 0 && fail === 0) {
-        // Si todos OK, deseleccionamos
-        metSinVipSelected.clear();
-        render();
-      }
-    };
-  };
-}
-function cerrarModalEnvio() {
-  document.getElementById('envio-modal').classList.add('hidden');
+  if (btn) btn.onclick = () => downloadCSV("no_estan_en_comunidad_vip.csv", _met1Rows());
+  const btnX = document.getElementById('met1-xlsx');
+  if (btnX) btnX.onclick = () => _dlXLSX(btnX, "no_estan_en_comunidad_vip.xlsx", _met1Rows(), "Sin VIP");
 }
 
 // ---------- VISTA 2: Master vs Iniciación ----------
@@ -2171,6 +2584,7 @@ function renderMetProgramas() {
   const m = DATA.metricas;
   let list = all.slice();
   if (metProgFilter !== "Todos") list = list.filter(u => u.programa === metProgFilter);
+  if (metProgPais !== "Todos") list = list.filter(u => paisMatch((u.paises||[]), metProgPais));
   if (metProgSearch) {
     const s = metProgSearch.toLowerCase();
     list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
@@ -2200,7 +2614,9 @@ function renderMetProgramas() {
         <input id="met2-search" type="text" placeholder="Buscar por nombre o email..."
                class="flex-1 min-w-[260px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
                value="${metProgSearch.replace(/"/g,'&quot;')}">
-        <button id="met2-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ Descargar CSV</button>
+        ${paisSelectHTML('met2-pais', all, metProgPais)}
+        <button id="met2-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="met2-xlsx" class="text-[11px] px-3 py-2 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Programa:</div>
@@ -2220,6 +2636,7 @@ function renderMetProgramas() {
               <th class="text-left">Email</th>
               <th class="text-left">Teléfono</th>
               <th class="text-center">Programa</th>
+              <th class="text-left">País</th>
             </tr>
           </thead>
           <tbody>
@@ -2229,10 +2646,11 @@ function renderMetProgramas() {
                 <td class="text-slate-300">${u.email||'—'}</td>
                 <td class="text-slate-400 font-mono">${u.telefono||'—'}</td>
                 <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[u.programa]||u.programa}</span></td>
+                <td class="text-[14px]">${(u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—'}</td>
               </tr>
             `).join('')}
-            ${list.length>1000?`<tr><td colspan="4" class="text-center text-slate-500 py-3">... y ${list.length-1000} más (usa CSV para ver todos)</td></tr>`:''}
-            ${list.length===0?`<tr><td colspan="4" class="text-center text-slate-500 py-6">— sin resultados —</td></tr>`:''}
+            ${list.length>1000?`<tr><td colspan="5" class="text-center text-slate-500 py-3">... y ${list.length-1000} más (usa CSV para ver todos)</td></tr>`:''}
+            ${list.length===0?`<tr><td colspan="5" class="text-center text-slate-500 py-6">— sin resultados —</td></tr>`:''}
           </tbody>
         </table>
       </div>
@@ -2241,24 +2659,30 @@ function renderMetProgramas() {
 }
 function wireMetProgramas() {
   document.querySelectorAll('[data-met2prog]').forEach(b => b.onclick = () => { metProgFilter = b.dataset.met2prog; render(); });
+  const ps = document.getElementById('met2-pais');
+  if (ps) ps.onchange = e => { metProgPais = e.target.value; render(); };
   const inp = document.getElementById('met2-search');
   if (inp) {
     inp.oninput = e => { metProgSearch = e.target.value; render(); };
     inp.focus(); inp.setSelectionRange(metProgSearch.length, metProgSearch.length);
   }
-  const btn = document.getElementById('met2-csv');
-  if (btn) btn.onclick = () => {
+  function _met2Rows() {
     const all = DATA.metricas.programas || [];
     let list = all.slice();
     if (metProgFilter !== "Todos") list = list.filter(u => u.programa === metProgFilter);
+    if (metProgPais !== "Todos") list = list.filter(u => paisMatch((u.paises||[]), metProgPais));
     if (metProgSearch) {
       const s = metProgSearch.toLowerCase();
       list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
     }
-    const rows = [["Nombre","Email","Teléfono","Programa"]];
-    list.forEach(u => rows.push([u.nombre,u.email,u.telefono,u.programa]));
-    downloadCSV("master_vs_iniciacion.csv", rows);
-  };
+    const rows = [["Nombre","Email","Teléfono","Programa","Países"]];
+    list.forEach(u => rows.push([u.nombre,u.email,u.telefono,u.programa,(u.paises||[]).join('|')]));
+    return rows;
+  }
+  const btn = document.getElementById('met2-csv');
+  if (btn) btn.onclick = () => downloadCSV("master_vs_iniciacion.csv", _met2Rows());
+  const btnX = document.getElementById('met2-xlsx');
+  if (btnX) btnX.onclick = () => _dlXLSX(btnX, "master_vs_iniciacion.xlsx", _met2Rows(), "Programas");
 }
 
 // ---------- VISTA: Estudiantes (Escala/Iniciación + ventas Dropi) ----------
@@ -2270,12 +2694,15 @@ function renderEstudiantes() {
   let base = all.filter(u => estSubtab === "vip" ? u.tiene_vip_new : !u.tiene_vip_new);
   let list = base.slice();
   if (estProg !== "Todos")   list = list.filter(u => u.programa === estProg);
+  if (estPais !== "Todos")   list = list.filter(u => paisMatch((u.paises||[]), estPais));
   if (estVentas === "Con ventas") list = list.filter(u => u.tiene_ventas);
   else if (estVentas === "Sin ventas") list = list.filter(u => !u.tiene_ventas);
   if (estSearch) {
     const s = estSearch.toLowerCase();
     list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s) || (u.telefono||'').includes(s));
   }
+  // Subsetear ped_mes al país filtrado
+  if (estPais !== "Todos") list = list.map(u => viewByPais(u, estPais));
   const monthCols = months.map(m2 => `<th class="text-right text-[10px] uppercase tracking-wider">${mesShort(m2)}</th>`).join('');
   // Conteos por programa dentro del subtab activo
   const progCnt = {
@@ -2308,7 +2735,9 @@ function renderEstudiantes() {
         <input id="est-search" type="text" placeholder="Buscar por nombre, email o teléfono..."
                class="flex-1 min-w-[260px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
                value="${estSearch.replace(/"/g,'&quot;')}">
-        <button id="est-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ Descargar CSV</button>
+        ${paisSelectHTML('est-pais', base, estPais)}
+        <button id="est-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="est-xlsx" class="text-[11px] px-3 py-2 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
       </div>
       <div class="flex flex-wrap items-center gap-2 mb-2">
         <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Programa:</div>
@@ -2365,29 +2794,36 @@ function wireEstudiantes() {
   document.querySelectorAll('[data-estsub]').forEach(b => b.onclick = () => { estSubtab = b.dataset.estsub; render(); });
   document.querySelectorAll('[data-estprog]').forEach(b => b.onclick = () => { estProg = b.dataset.estprog; render(); });
   document.querySelectorAll('[data-estventas]').forEach(b => b.onclick = () => { estVentas = b.dataset.estventas; render(); });
+  const ps = document.getElementById('est-pais');
+  if (ps) ps.onchange = e => { estPais = e.target.value; render(); };
   const inp = document.getElementById('est-search');
   if (inp) {
     inp.oninput = e => { estSearch = e.target.value; render(); };
     inp.focus(); inp.setSelectionRange(estSearch.length, estSearch.length);
   }
-  const btn = document.getElementById('est-csv');
-  if (btn) btn.onclick = () => {
+  function _estRows() {
     const all = DATA.metricas.estudiantes || [];
     const months = DATA.meta.ventana;
     let base = all.filter(u => estSubtab === "vip" ? u.tiene_vip_new : !u.tiene_vip_new);
     let list = base.slice();
     if (estProg !== "Todos") list = list.filter(u => u.programa === estProg);
+    if (estPais !== "Todos") list = list.filter(u => paisMatch((u.paises||[]), estPais));
     if (estVentas === "Con ventas") list = list.filter(u => u.tiene_ventas);
     else if (estVentas === "Sin ventas") list = list.filter(u => !u.tiene_ventas);
     if (estSearch) {
       const s = estSearch.toLowerCase();
       list = list.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s) || (u.telefono||'').includes(s));
     }
+    if (estPais !== "Todos") list = list.map(u => viewByPais(u, estPais));
     const header = ["Nombre","Email","Teléfono","Programa","VIP","Países","Escalafón", ...months, "Total pedidos"];
     const rows = [header];
     list.forEach(u => rows.push([u.nombre,u.email,u.telefono,u.programa,u.tiene_vip_new?"Sí":"No",(u.paises||[]).join('|'),u.nivel, ...months.map(mo=>u.ped_mes[mo]||0), u.total_pedidos]));
-    downloadCSV(`estudiantes_${estSubtab}.csv`, rows);
-  };
+    return rows;
+  }
+  const btn = document.getElementById('est-csv');
+  if (btn) btn.onclick = () => downloadCSV(`estudiantes_${estSubtab}.csv`, _estRows());
+  const btnX = document.getElementById('est-xlsx');
+  if (btnX) btnX.onclick = () => _dlXLSX(btnX, `estudiantes_${estSubtab}.xlsx`, _estRows(), "Estudiantes");
 }
 
 // ---------- VISTA 3: En Dropi sin GHL ----------
@@ -2398,12 +2834,12 @@ function renderMetDropiGHL() {
   let list = all.slice();
   if (metDropiVentas === "Con ventas") list = list.filter(u => u.tiene_ventas);
   else if (metDropiVentas === "Sin ventas") list = list.filter(u => !u.tiene_ventas);
-  if (metDropiCountry !== "Todos") list = list.filter(u => (u.paises||[]).includes(metDropiCountry));
+  if (metDropiCountry !== "Todos") list = list.filter(u => paisMatch((u.paises||[]), metDropiCountry));
   if (metDropiSearch) {
     const s = metDropiSearch.toLowerCase();
     list = list.filter(u => (u.email||'').toLowerCase().includes(s) || (u.nombre||'').toLowerCase().includes(s) || (u.telefono||'').includes(s));
   }
-  const allCountries = [...new Set(all.flatMap(u => u.paises||[]))].sort();
+  const allCountries = paisesUnicos(all.flatMap(u => u.paises||[]));
   const monthCols = months.map(m2 => `<th class="text-right text-[10px] uppercase tracking-wider">${mesShort(m2)}</th>`).join('');
   const cnt = {
     "Todos":      all.length,
@@ -2432,7 +2868,8 @@ function renderMetDropiGHL() {
           <option value="Todos">Todos los países</option>
           ${allCountries.map(p => `<option value="${p}" ${metDropiCountry===p?'selected':''}>${flag(p)} ${p}</option>`).join('')}
         </select>
-        <button id="met3-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ Descargar CSV</button>
+        <button id="met3-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="met3-xlsx" class="text-[11px] px-3 py-2 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Ventas:</div>
@@ -2452,6 +2889,7 @@ function renderMetDropiGHL() {
               <th class="text-left">Nombre</th>
               <th class="text-left">Teléfono</th>
               <th class="text-left">Países</th>
+              <th class="text-center">Programa</th>
               <th class="text-center">Escalafón</th>
               ${monthCols}
               <th class="text-right">Total ped.</th>
@@ -2465,14 +2903,15 @@ function renderMetDropiGHL() {
                 <td class="text-slate-300">${tc(u.nombre)||'—'}</td>
                 <td class="text-slate-400 font-mono">${u.telefono||'—'}</td>
                 <td class="text-[14px]">${(u.paises||[]).map(p => `<span title="${p}">${flag(p)}</span>`).join(' ')||'—'}</td>
+                <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[u.programa]||u.programa||'—'}</span></td>
                 <td class="text-center"><span class="pill ${tierColor[u.nivel]}">${u.nivel==='Sin clasificar'?'Sin nivel':u.nivel}</span></td>
                 ${months.map(m2 => `<td class="text-right font-mono ${(u.ped_mes[m2]||0)===0?'text-slate-700':'text-slate-400'}">${fmt(u.ped_mes[m2])}</td>`).join('')}
                 <td class="text-right font-mono font-semibold ${u.total_pedidos>0?'text-slate-100':'text-slate-600'}">${fmt(u.total_pedidos)}</td>
                 <td class="text-center font-mono text-slate-400">${u.n_meses_activos}/${months.length}</td>
               </tr>
             `).join('')}
-            ${list.length>1500?`<tr><td colspan="${5+months.length+2}" class="text-center text-slate-500 py-3">... y ${list.length-1500} más (usa CSV para ver todos)</td></tr>`:''}
-            ${list.length===0?`<tr><td colspan="${5+months.length+2}" class="text-center text-slate-500 py-6">— sin resultados —</td></tr>`:''}
+            ${list.length>1500?`<tr><td colspan="${6+months.length+2}" class="text-center text-slate-500 py-3">... y ${list.length-1500} más (usa CSV para ver todos)</td></tr>`:''}
+            ${list.length===0?`<tr><td colspan="${6+months.length+2}" class="text-center text-slate-500 py-6">— sin resultados —</td></tr>`:''}
           </tbody>
         </table>
       </div>
@@ -2481,10 +2920,12 @@ function renderMetDropiGHL() {
 }
 // ---------- VISTA 4: Posibles duplicados ----------
 let metDupSearch = "";
+let metDupPais = "Todos";
 function renderMetDuplicados() {
   const all = DATA.metricas.duplicados || [];
   const m = DATA.metricas;
   let list = all.slice();
+  if (metDupPais !== "Todos") list = list.filter(d => d.tienda_pais === metDupPais);
   if (metDupSearch) {
     const s = metDupSearch.toLowerCase();
     list = list.filter(d =>
@@ -2494,6 +2935,7 @@ function renderMetDuplicados() {
       (d.otro_nombre||'').toLowerCase().includes(s)
     );
   }
+  const dupPaises = [...new Set(all.map(d => d.tienda_pais).filter(Boolean))].sort();
   return `
     <div class="card p-4 mb-4">
       <h2 class="text-base font-bold neon-cyan mb-1">🔁 Posibles duplicados</h2>
@@ -2515,7 +2957,12 @@ function renderMetDuplicados() {
         <input id="met4-search" type="text" placeholder="Buscar por nombre o correo..."
                class="flex-1 min-w-[260px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
                value="${metDupSearch.replace(/"/g,'&quot;')}">
-        <button id="met4-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ Descargar CSV</button>
+        <select id="met4-pais" class="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
+          <option value="Todos">Todos los países</option>
+          ${dupPaises.map(p => `<option value="${p}" ${metDupPais===p?'selected':''}>${flag(p)} ${p}</option>`).join('')}
+        </select>
+        <button id="met4-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="met4-xlsx" class="text-[11px] px-3 py-2 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
       </div>
     </div>
 
@@ -2558,15 +3005,17 @@ function renderMetDuplicados() {
   `;
 }
 function wireMetDuplicados() {
+  const ps = document.getElementById('met4-pais');
+  if (ps) ps.onchange = e => { metDupPais = e.target.value; render(); };
   const inp = document.getElementById('met4-search');
   if (inp) {
     inp.oninput = e => { metDupSearch = e.target.value; render(); };
     inp.focus(); inp.setSelectionRange(metDupSearch.length, metDupSearch.length);
   }
-  const btn = document.getElementById('met4-csv');
-  if (btn) btn.onclick = () => {
+  function _met4Rows() {
     const all = DATA.metricas.duplicados || [];
     let list = all.slice();
+    if (metDupPais !== "Todos") list = list.filter(d => d.tienda_pais === metDupPais);
     if (metDupSearch) {
       const s = metDupSearch.toLowerCase();
       list = list.filter(d =>
@@ -2581,8 +3030,12 @@ function wireMetDuplicados() {
       d.nombre, d.email_principal, d.telefono, d.tienda_slot, d.tienda_pais,
       d.tienda_email, d.otro_nombre, d.tienda_email, d.otro_telefono, d.cid, d.otro_cid
     ]));
-    downloadCSV("posibles_duplicados.csv", rows);
-  };
+    return rows;
+  }
+  const btn = document.getElementById('met4-csv');
+  if (btn) btn.onclick = () => downloadCSV("posibles_duplicados.csv", _met4Rows());
+  const btnX = document.getElementById('met4-xlsx');
+  if (btnX) btnX.onclick = () => _dlXLSX(btnX, "posibles_duplicados.xlsx", _met4Rows(), "Duplicados");
 }
 
 function wireMetDropiGHL() {
@@ -2594,23 +3047,26 @@ function wireMetDropiGHL() {
     inp.oninput = e => { metDropiSearch = e.target.value; render(); };
     inp.focus(); inp.setSelectionRange(metDropiSearch.length, metDropiSearch.length);
   }
-  const btn = document.getElementById('met3-csv');
-  if (btn) btn.onclick = () => {
+  function _met3Rows() {
     const all = DATA.metricas.dropi_sin_ghl || [];
     const months = DATA.meta.ventana;
     let list = all.slice();
     if (metDropiVentas === "Con ventas") list = list.filter(u => u.tiene_ventas);
     else if (metDropiVentas === "Sin ventas") list = list.filter(u => !u.tiene_ventas);
-    if (metDropiCountry !== "Todos") list = list.filter(u => (u.paises||[]).includes(metDropiCountry));
+    if (metDropiCountry !== "Todos") list = list.filter(u => paisMatch((u.paises||[]), metDropiCountry));
     if (metDropiSearch) {
       const s = metDropiSearch.toLowerCase();
       list = list.filter(u => (u.email||'').toLowerCase().includes(s) || (u.nombre||'').toLowerCase().includes(s) || (u.telefono||'').includes(s));
     }
-    const header = ["Email","Nombre","Teléfono","Países","Escalafón", ...months, "Total pedidos","Meses activos"];
+    const header = ["Email","Nombre","Teléfono","Países","Programa","Escalafón", ...months, "Total pedidos","Meses activos"];
     const rows = [header];
-    list.forEach(u => rows.push([u.email,u.nombre,u.telefono,(u.paises||[]).join('|'),u.nivel, ...months.map(m=>u.ped_mes[m]||0), u.total_pedidos, u.n_meses_activos]));
-    downloadCSV("dropi_sin_ghl.csv", rows);
-  };
+    list.forEach(u => rows.push([u.email,u.nombre,u.telefono,(u.paises||[]).join('|'),u.programa||'Sin programa',u.nivel, ...months.map(m=>u.ped_mes[m]||0), u.total_pedidos, u.n_meses_activos]));
+    return rows;
+  }
+  const btn = document.getElementById('met3-csv');
+  if (btn) btn.onclick = () => downloadCSV("dropi_sin_ghl.csv", _met3Rows());
+  const btnX = document.getElementById('met3-xlsx');
+  if (btnX) btnX.onclick = () => _dlXLSX(btnX, "dropi_sin_ghl.xlsx", _met3Rows(), "Dropi sin GHL");
 }
 
 function wireClasificacion() {
@@ -2643,6 +3099,45 @@ function wireClasificacion() {
     inp.focus();
     inp.setSelectionRange(currentSearch.length, currentSearch.length);
   }
+  // Export: respeta filtros + orden actuales de la tabla de Clasificación
+  function _clasifRows() {
+    const users = baseUsers();
+    let scope = users;
+    if (currentVentas === "Con ventas") scope = scope.filter(u => (u.total_pedidos||0) > 0);
+    else if (currentVentas === "Sin ventas") scope = scope.filter(u => (u.total_pedidos||0) === 0);
+    if (currentProgs.size) scope = scope.filter(u => currentProgs.has(u.programa));
+    if (currentCountry !== "Todos") scope = scope.filter(u => paisMatch((u.paises_unicos||[]), currentCountry));
+    if (currentMultipais) scope = scope.filter(u => (u.paises_unicos||[]).length > 1);
+    if (currentSearch) {
+      const s = currentSearch.toLowerCase();
+      scope = scope.filter(u => (u.nombre||'').toLowerCase().includes(s) || (u.email||'').toLowerCase().includes(s));
+    }
+    let filtered = scope;
+    if (currentTiers.size) filtered = filtered.filter(u => currentTiers.has(u.nivel));
+    const dir = sortDir === 'asc' ? -1 : 1;
+    if (sortCol === 'nivel') filtered.sort((a,b)=> dir*(TIER_ORDER.indexOf(a.nivel) - TIER_ORDER.indexOf(b.nivel)) || (b.total_pedidos - a.total_pedidos));
+    else if (sortCol === 'total') filtered.sort((a,b)=> dir*((b.total_pedidos||0) - (a.total_pedidos||0)));
+    else if (sortCol === 'suma_top3') filtered.sort((a,b)=> dir*((b.suma_top3||0) - (a.suma_top3||0)));
+    else if (sortCol === 'pct_dev') filtered.sort((a,b)=> dir*((b.pct_dev||0) - (a.pct_dev||0)));
+    else filtered.sort((a,b)=> dir*(((b.ped_mes&&b.ped_mes[sortCol])||0) - ((a.ped_mes&&a.ped_mes[sortCol])||0)));
+    const months = DATA.meta.ventana;
+    const header = ["Nombre","Email","Teléfono","Nivel","Programa","Países", ...months, "Total pedidos","Top-3 (escalafón)","% Dev.","Semáforo","Alerta"];
+    const rows = [header];
+    filtered.forEach(u => rows.push([
+      u.nombre, u.email, u.telefono,
+      u.nivel==='Sin clasificar'?'Sin nivel':u.nivel,
+      PROG_SHORT[u.programa]||u.programa||'Sin programa',
+      (u.paises_unicos||u.paises||[]).join('|'),
+      ...months.map(m => u.ped_mes[m]||0),
+      u.total_pedidos, u.suma_top3, u.pct_dev,
+      u.semaforo||'', u.alerta_tipo||''
+    ]));
+    return rows;
+  }
+  const btnC = document.getElementById('clasif-csv');
+  if (btnC) btnC.onclick = () => downloadCSV("clasificacion_vip.csv", _clasifRows());
+  const btnCX = document.getElementById('clasif-xlsx');
+  if (btnCX) btnCX.onclick = () => _dlXLSX(btnCX, "clasificacion_vip.xlsx", _clasifRows(), "Clasificación VIP");
 }
 
 function initials(name) {
@@ -2696,6 +3191,19 @@ function abrirFicha(cid) {
     </tr>`;
   }).join('');
 
+  // Agrupar tiendas por país (una entrada por país, con lista de correos)
+  const tiendasPorPais = {};
+  (u.tiendas_detalle||[]).forEach(t => {
+    const key = (t.pais && t.pais.trim()) || 'Sin país';
+    if (!tiendasPorPais[key]) tiendasPorPais[key] = [];
+    tiendasPorPais[key].push(t);
+  });
+  const paisesOrdenados = Object.keys(tiendasPorPais).sort((a,b) => a.localeCompare(b));
+  // Set de países declarados en GHL (canónicos) — se usa para marcar ⚠ los
+  // países donde el email vende en Dropi pero NO hay tienda registrada en GHL.
+  const _declaradosSet = new Set((u.paises_declarados||[]).map(_paisKey));
+  const paisEsDeclarado = pais => _declaradosSet.has(_paisKey(pais));
+
   document.getElementById('ficha-content').innerHTML = `
     <div class="card p-4 mb-3">
       <div class="flex items-start gap-3">
@@ -2714,6 +3222,90 @@ function abrirFicha(cid) {
         <div><div class="text-sm font-bold leading-tight">${(u.paises_unicos||[]).map(p=>flag(p)+' '+p).join('<br>')||'—'}</div><div class="text-[9px] uppercase tracking-wider text-slate-500 mt-0.5">Países</div></div>
       </div>
     </div>
+
+    <!-- TIENDAS: agrupadas por país + lista de correos. Visible desde arriba. -->
+    <div class="card p-4 mb-3">
+      <div class="flex items-baseline justify-between mb-2">
+        <h4 class="text-sm font-semibold">Tiendas por país <span class="text-[10px] text-slate-500">(${(u.tiendas_detalle||[]).length} correo${(u.tiendas_detalle||[]).length===1?'':'s'} en ${paisesOrdenados.length} país${paisesOrdenados.length===1?'':'es'})</span></h4>
+        ${(u.tiendas_detalle||[]).length ? `<button onclick="navigator.clipboard.writeText(${JSON.stringify((u.tiendas_detalle||[]).map(t=>t.email).join('\\n'))}); this.textContent='✓ Copiado';" class="text-[10px] px-2 py-1 rounded bg-cyan-600/20 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-600/30">📋 Copiar correos</button>` : ''}
+      </div>
+      ${u.sin_tienda ? '<div class="text-sm text-red-400">⚠ Este contacto no tiene ninguna Tienda 1..10 cargada en GHL.</div>' : `
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+        ${paisesOrdenados.map(pais => `
+          <div class="rounded-lg border border-white/10 bg-black/30 p-2.5">
+            <div class="flex items-center gap-2 mb-1.5">
+              <span class="text-base leading-none">${flag(pais==='Sin país'?'':pais)}</span>
+              <span class="text-xs font-semibold text-slate-200">${pais}</span>
+              <span class="text-[10px] text-slate-500">· ${tiendasPorPais[pais].length} correo${tiendasPorPais[pais].length===1?'':'s'}</span>
+            </div>
+            <ul class="space-y-0.5 text-[11px] font-mono text-slate-300 pl-1">
+              ${tiendasPorPais[pais].map(t => `<li class="truncate" title="${t.email}${t.primera_vez?' · '+t.primera_vez:''}">• ${t.email}${t.primera_vez?` <span class="text-slate-500 font-sans">(${t.primera_vez})</span>`:''}</li>`).join('')}
+            </ul>
+          </div>
+        `).join('')}
+      </div>`}
+    </div>
+
+    ${(() => {
+      // Ventas por país mes a mes (usa u.ped_mes_pais / ent_mes_pais / dev_mes_pais).
+      // Muestra una columna por país + totales, para comparar el rendimiento
+      // de cada tienda del contacto durante la ventana.
+      const pmp = u.ped_mes_pais || {};
+      const emp = u.ent_mes_pais || {};
+      const dmp = u.dev_mes_pais || {};
+      const paisesConVentas = Object.keys(pmp).filter(p => Object.values(pmp[p]||{}).some(v => v > 0)).sort();
+      if (!paisesConVentas.length) return '';
+      // Totales por país (para header)
+      const totPais = {};
+      paisesConVentas.forEach(p => totPais[p] = months.reduce((s,m) => s + (pmp[p][m]||0), 0));
+      const huerfanos = paisesConVentas.filter(p => !paisEsDeclarado(p));
+      return `
+      <div class="card p-4 mb-3">
+        <h4 class="text-sm font-semibold mb-1">Ventas por país (mes a mes)</h4>
+        <div class="text-[11px] text-slate-500 mb-2">Desglose de pedidos según la tienda del país. Pedidos = Entregados + Devoluciones.${huerfanos.length ? ` <span class="text-amber-400">⚠ ${huerfanos.map(flag).join(' ')} vende sin tienda declarada en GHL.</span>` : ''}</div>
+        <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="text-[10px] text-slate-500 uppercase tracking-wider border-b border-white/10">
+            <tr>
+              <th class="text-left py-2">Mes</th>
+              ${paisesConVentas.map(p => {
+                const declarado = paisEsDeclarado(p);
+                const mark = declarado ? '' : ' <span class="text-amber-400" title="Sin tienda declarada en GHL">⚠</span>';
+                const cls = declarado ? '' : ' text-amber-300';
+                return `<th class="text-right px-2${cls}"><span class="text-base leading-none">${flag(p)}</span> ${p}${mark}</th>`;
+              }).join('')}
+              <th class="text-right px-2 border-l border-white/10">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${months.map(m => {
+              const total_m = paisesConVentas.reduce((s,p) => s + (pmp[p][m]||0), 0);
+              return `<tr class="border-b border-white/5">
+                <td class="py-1.5 text-slate-300">${mesShort(m)}</td>
+                ${paisesConVentas.map(p => `<td class="text-right font-mono ${(pmp[p][m]||0)===0?'text-slate-600':'text-slate-200'}">${fmt(pmp[p][m]||0)}</td>`).join('')}
+                <td class="text-right font-mono font-semibold text-cyan-300 border-l border-white/10">${fmt(total_m)}</td>
+              </tr>`;
+            }).join('')}
+            <tr class="border-t border-white/20 bg-white/[0.03]">
+              <td class="py-2 font-semibold neon-cyan">Total</td>
+              ${paisesConVentas.map(p => `<td class="text-right font-mono font-semibold">${fmt(totPais[p])}</td>`).join('')}
+              <td class="text-right font-mono font-semibold text-cyan-300 border-l border-white/10">${fmt(Object.values(totPais).reduce((s,v)=>s+v,0))}</td>
+            </tr>
+            <tr class="text-[10px] text-slate-500">
+              <td class="pt-1">Entregados</td>
+              ${paisesConVentas.map(p => `<td class="text-right font-mono">${fmt(months.reduce((s,m) => s + ((emp[p]||{})[m]||0), 0))}</td>`).join('')}
+              <td class="text-right font-mono border-l border-white/10">${fmt(paisesConVentas.reduce((s,p) => s + months.reduce((s2,m) => s2 + ((emp[p]||{})[m]||0), 0), 0))}</td>
+            </tr>
+            <tr class="text-[10px] text-slate-500">
+              <td>Devoluciones</td>
+              ${paisesConVentas.map(p => `<td class="text-right font-mono">${fmt(months.reduce((s,m) => s + ((dmp[p]||{})[m]||0), 0))}</td>`).join('')}
+              <td class="text-right font-mono border-l border-white/10">${fmt(paisesConVentas.reduce((s,p) => s + months.reduce((s2,m) => s2 + ((dmp[p]||{})[m]||0), 0), 0))}</td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+      </div>`;
+    })()}
 
     <div class="card p-4 mb-3">
       <h4 class="text-sm font-semibold mb-1">Historial por mes</h4>
@@ -2744,26 +3336,9 @@ function abrirFicha(cid) {
       </table>
     </div>
 
-    <div class="card p-4 mb-3">
+    <div class="card p-4">
       <h4 class="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Evolución pedidos VIP</h4>
       <canvas id="ficha-chart" height="140"></canvas>
-    </div>
-
-    <div class="card p-4">
-      <h4 class="text-sm font-semibold mb-2">Tiendas vinculadas (${(u.tiendas_detalle||[]).length})</h4>
-      ${u.sin_tienda ? '<div class="text-sm text-red-400">⚠ Este contacto no tiene ninguna Tienda 1..10 cargada en GHL.</div>' : `
-      <table class="w-full text-xs">
-        <thead class="text-[10px] text-slate-500 uppercase tracking-wider border-b border-white/10">
-          <tr><th class="text-left py-2">Email</th><th class="text-left">País</th><th class="text-left">Primera vez (en datos)</th></tr>
-        </thead>
-        <tbody>
-          ${(u.tiendas_detalle||[]).map(t => `<tr class="border-b border-white/5">
-            <td class="py-2 text-slate-200">${t.email}</td>
-            <td class="text-slate-300">${flag(t.pais||'')} ${t.pais||'—'}</td>
-            <td class="text-slate-400 font-mono text-xs">${t.primera_vez||'—'}</td>
-          </tr>`).join('')}
-        </tbody>
-      </table>`}
     </div>
   `;
   document.getElementById('ficha-modal').classList.remove('hidden');
@@ -2940,6 +3515,30 @@ render();
 """
 
 
+def export_escalafon_json(data, out_path):
+    """API de consulta para la landing: dict { sha256(email): {nivel, nombre} }.
+    Los correos NO se publican en plano (la landing hashea el input igual y busca).
+    Si el correo no está en la base, la landing recibe `null` (key inexistente).
+    Orden de prioridad: VIP > Estudiantes > Dropi-sin-GHL (gana el primer match)."""
+    escalafon = {}
+    def add(email, nivel, nombre):
+        em = (email or "").strip().lower()
+        if not em or "@" not in em or not nivel:
+            return
+        h = hashlib.sha256(em.encode("utf-8")).hexdigest()
+        if h not in escalafon:
+            escalafon[h] = {"nivel": nivel, "nombre": (nombre or "").strip().title()}
+    for u in data.get("usuarios", []):
+        add(u.get("email"), u.get("nivel"), u.get("nombre"))
+    for u in data.get("metricas", {}).get("estudiantes", []):
+        add(u.get("email"), u.get("nivel"), u.get("nombre"))
+    for u in data.get("metricas", {}).get("dropi_sin_ghl", []):
+        add(u.get("email"), u.get("nivel"), u.get("nombre"))
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(escalafon, f, ensure_ascii=False, separators=(",", ":"))
+    return len(escalafon)
+
+
 def main():
     print("Generando dashboard.html...")
     data = compute_all()
@@ -2947,6 +3546,8 @@ def main():
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(html_str)
     print(f"✓ {OUT}")
+    n = export_escalafon_json(data, os.path.join(HERE, "escalafon.json"))
+    print(f"✓ {os.path.join(HERE, 'escalafon.json')} · {n} correos consultables")
     print(f"  Usuarios totales: {data['stats']['usuarios_totales']}")
     print(f"  Clasificados:     {data['stats']['clasificados_vip']}")
     print(f"  Multi-país:       {data['stats']['multi_pais']}")
