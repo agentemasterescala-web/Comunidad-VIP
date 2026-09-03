@@ -16,8 +16,15 @@
 
     <!-- Corre cada 10 minutos (600 segundos) — clasifica contactos modificados
          de forma cuasi-tiempo-real sin necesidad de webhook/tunnel. -->
-    <key>StartInterval</key>
-    <integer>600</integer>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Minute</key><integer>10</integer></dict>
+        <dict><key>Minute</key><integer>20</integer></dict>
+        <dict><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Minute</key><integer>40</integer></dict>
+        <dict><key>Minute</key><integer>50</integer></dict>
+    </array>
 
     <!-- También dispara una vez al cargar la rutina, así arranca inmediato. -->
     <key>RunAtLoad</key>

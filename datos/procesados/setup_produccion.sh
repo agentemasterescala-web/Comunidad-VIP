@@ -30,6 +30,38 @@ LABEL_PB="com.masterescala.comunidad-vip-publish"
 PLIST_SRC_PB="$HERE/launchd/com.masterescala.comunidad-vip-publish.plist.template"
 PLIST_DST_PB="$HOME/Library/LaunchAgents/$LABEL_PB.plist"
 
+# Consolidar (python DIRECTO, no bash): lee los Excel de Google Drive y reconstruye
+# el maestro. Va en su propio agente porque macOS TCC no da acceso a Drive cuando
+# launchd lanza un wrapper bash (binario responsable = /bin/bash, de plataforma Apple).
+LABEL_CS="com.masterescala.comunidad-vip-consolidar"
+PLIST_SRC_CS="$HERE/launchd/com.masterescala.comunidad-vip-consolidar.plist.template"
+PLIST_DST_CS="$HOME/Library/LaunchAgents/$LABEL_CS.plist"
+
+# Taggear IG (python directo): detecta desde qué IG escribió un contacto y le
+# agrega el tag (ig-ivan-caicedo o ig-escala-academy) según meta.ig.pageId.
+LABEL_IG="com.masterescala.comunidad-vip-taggear-ig"
+PLIST_SRC_IG="$HERE/launchd/com.masterescala.comunidad-vip-taggear-ig.plist.template"
+PLIST_DST_IG="$HOME/Library/LaunchAgents/$LABEL_IG.plist"
+
+# Taggear WA (python directo): detecta desde qué número WA escribió el contacto
+# (from/to en mensajes TYPE_WHATSAPP) y le agrega tag wa-<últimos 4 dígitos>.
+LABEL_WA="com.masterescala.comunidad-vip-taggear-wa"
+PLIST_SRC_WA="$HERE/launchd/com.masterescala.comunidad-vip-taggear-wa.plist.template"
+PLIST_DST_WA="$HOME/Library/LaunchAgents/$LABEL_WA.plist"
+
+# Extraer pagos (python directo): lee notas de GHL 'Pago recibido App Master
+# Escala' y genera pagos.json que consume el dashboard.
+LABEL_EP="com.masterescala.comunidad-vip-extraer-pagos"
+PLIST_SRC_EP="$HERE/launchd/com.masterescala.comunidad-vip-extraer-pagos.plist.template"
+PLIST_DST_EP="$HOME/Library/LaunchAgents/$LABEL_EP.plist"
+
+# Publish LIGHT (bash): reclasifica + genera dashboard + push a gh-pages cada
+# 10 min, con change detection. NO refresca GHL (eso ya lo hace el pipeline).
+# Permite que los cambios lleguen al dashboard público en ≤10 min.
+LABEL_PL="com.masterescala.comunidad-vip-publish-light"
+PLIST_SRC_PL="$HERE/launchd/com.masterescala.comunidad-vip-publish-light.plist.template"
+PLIST_DST_PL="$HOME/Library/LaunchAgents/$LABEL_PL.plist"
+
 # Carpeta a vigilar (originales — donde tu equipo arrastra los Excel mensuales)
 ORIGINALES_DIR="$(cd "$HERE/../originales" && pwd)"
 
@@ -90,7 +122,7 @@ fi
 echo
 
 # ── 3) launchd plists ───────────────────────────────────
-echo "▶ [3/5] Generando 4 launchd plists (writeback + dashboard + watcher + publish)"
+echo "▶ [3/5] Generando 9 launchd plists (writeback + dashboard + watcher + publish + consolidar + taggear-ig + taggear-wa + extraer-pagos + publish-light)"
 mkdir -p "$HOME/Library/LaunchAgents" logs
 sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC" > "$PLIST_DST"
 chmod 644 "$PLIST_DST"
@@ -103,7 +135,22 @@ chmod 644 "$PLIST_DST_WT"
 echo "  ✓ Watcher plist:  $PLIST_DST_WT (vigila $ORIGINALES_DIR)"
 sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC_PB" > "$PLIST_DST_PB"
 chmod 644 "$PLIST_DST_PB"
-echo "  ✓ Publish plist:  $PLIST_DST_PB (09:00, 14:00 y 18:00 hora local)"
+echo "  ✓ Publish plist:  $PLIST_DST_PB (09:00, 10:15, 14:00 y 18:00 hora local)"
+sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC_CS" > "$PLIST_DST_CS"
+chmod 644 "$PLIST_DST_CS"
+echo "  ✓ Consolidar plist: $PLIST_DST_CS (cada 10 min, python directo → lee Drive)"
+sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC_IG" > "$PLIST_DST_IG"
+chmod 644 "$PLIST_DST_IG"
+echo "  ✓ Taggear-IG plist: $PLIST_DST_IG (cada 10 min, python directo → GHL API)"
+sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC_WA" > "$PLIST_DST_WA"
+chmod 644 "$PLIST_DST_WA"
+echo "  ✓ Taggear-WA plist: $PLIST_DST_WA (cada 10 min, python directo → GHL API)"
+sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC_EP" > "$PLIST_DST_EP"
+chmod 644 "$PLIST_DST_EP"
+echo "  ✓ Extraer-Pagos plist: $PLIST_DST_EP (cada 10 min, python directo → notas GHL)"
+sed "s|__INSTALL_DIR__|$HERE|g" "$PLIST_SRC_PL" > "$PLIST_DST_PL"
+chmod 644 "$PLIST_DST_PL"
+echo "  ✓ Publish-Light plist: $PLIST_DST_PL (cada 10 min, reclasifica + genera + push si cambió)"
 echo
 
 # ── 4) Cargar en launchd ────────────────────────────────
@@ -116,10 +163,25 @@ launchctl unload "$PLIST_DST_WT" 2>/dev/null || true
 launchctl load -w "$PLIST_DST_WT"
 launchctl unload "$PLIST_DST_PB" 2>/dev/null || true
 launchctl load -w "$PLIST_DST_PB"
+launchctl unload "$PLIST_DST_CS" 2>/dev/null || true
+launchctl load -w "$PLIST_DST_CS"
+launchctl unload "$PLIST_DST_IG" 2>/dev/null || true
+launchctl load -w "$PLIST_DST_IG"
+launchctl unload "$PLIST_DST_WA" 2>/dev/null || true
+launchctl load -w "$PLIST_DST_WA"
+launchctl unload "$PLIST_DST_EP" 2>/dev/null || true
+launchctl load -w "$PLIST_DST_EP"
+launchctl unload "$PLIST_DST_PL" 2>/dev/null || true
+launchctl load -w "$PLIST_DST_PL"
 launchctl list | grep -q "$LABEL"    && echo "  ✓ Writeback cargado (cada 10 min)"        || echo "  ⚠ Writeback no se ve"
 launchctl list | grep -q "$LABEL_DB" && echo "  ✓ Dashboard cargado (cada 90 segundos)"    || echo "  ⚠ Dashboard no se ve"
 launchctl list | grep -q "$LABEL_WT" && echo "  ✓ Watcher cargado  (instantáneo al subir Excel)" || echo "  ⚠ Watcher no se ve"
-launchctl list | grep -q "$LABEL_PB" && echo "  ✓ Publish cargado  (09:00, 14:00 y 18:00)" || echo "  ⚠ Publish no se ve"
+launchctl list | grep -q "$LABEL_PB" && echo "  ✓ Publish cargado  (09:00, 10:15, 14:00 y 18:00)" || echo "  ⚠ Publish no se ve"
+launchctl list | grep -q "$LABEL_CS" && echo "  ✓ Consolidar cargado (cada 10 min, lee Drive)" || echo "  ⚠ Consolidar no se ve"
+launchctl list | grep -q "$LABEL_IG" && echo "  ✓ Taggear-IG cargado (cada 10 min, GHL API)" || echo "  ⚠ Taggear-IG no se ve"
+launchctl list | grep -q "$LABEL_WA" && echo "  ✓ Taggear-WA cargado (cada 10 min, GHL API)" || echo "  ⚠ Taggear-WA no se ve"
+launchctl list | grep -q "$LABEL_EP" && echo "  ✓ Extraer-Pagos cargado (cada 10 min, notas GHL)" || echo "  ⚠ Extraer-Pagos no se ve"
+launchctl list | grep -q "$LABEL_PL" && echo "  ✓ Publish-Light cargado (cada 10 min, push si cambió)" || echo "  ⚠ Publish-Light no se ve"
 echo
 
 # ── 5) Run-now de prueba ────────────────────────────────
@@ -132,27 +194,29 @@ if [[ "$RESP" =~ ^[Yy]$ ]]; then
   ls -t logs/ 2>/dev/null | head -3
 fi
 
-# ── Verificación de Full Disk Access ────────────────────
+# ── Verificación de Full Disk Access (acceso a Google Drive) ────────────────
 echo
-echo "▶ Verificando permisos macOS (Full Disk Access)"
-sleep 8   # esperar que la primera corrida del dashboard se ejecute
-if [ -f logs/launchd-dashboard.err.log ] && grep -q "Operation not permitted" logs/launchd-dashboard.err.log 2>/dev/null; then
-  echo "  ⚠️  PROBLEMA DETECTADO: macOS bloquea launchd al acceder a este directorio."
-  echo "     Esto pasa cuando el proyecto vive dentro de ~/Documents/."
+echo "▶ Verificando acceso a Google Drive desde launchd (Full Disk Access)"
+sleep 8   # esperar que la primera corrida del agente consolidar se ejecute
+PY_REAL="$(/usr/bin/python3 -c 'import sys; print(sys.executable)' 2>/dev/null)"
+if [ -f logs/launchd-consolidar.out.log ] && grep -q "0 registros leídos" logs/launchd-consolidar.out.log 2>/dev/null; then
+  echo "  ⚠️  PROBLEMA: el agente consolidar lee 0 Excels desde Google Drive."
+  echo "     macOS TCC no le da a launchd acceso a ~/Library/CloudStorage/ sin permiso."
   echo
   echo "  📋 Para arreglarlo (1 vez):"
-  echo "     1. Abre System Settings → Privacy & Security → Full Disk Access"
-  echo "     2. Click '+' y agrega /bin/bash (usa Cmd+Shift+G en el diálogo y escribe /bin/bash)"
-  echo "     3. Activa el toggle"
-  echo "     4. Repite con /usr/bin/python3 (mismo path)"
-  echo "     5. Recarga las rutinas:"
-  echo "          launchctl unload $PLIST_DST_DB && launchctl load -w $PLIST_DST_DB"
-  echo "          launchctl unload $PLIST_DST    && launchctl load -w $PLIST_DST"
+  echo "     1. Abre Ajustes → Privacidad y seguridad → Acceso total al disco"
+  echo "     2. Click '+'. En el diálogo pulsa la tecla '/' (abre 'Ir a:') y pega EXACTO:"
+  echo "          $PY_REAL"
+  echo "     3. Selecciónalo y deja el toggle ACTIVADO"
+  echo "     4. Recarga el agente consolidar:"
+  echo "          launchctl bootout gui/\$(id -u)/$LABEL_CS"
+  echo "          launchctl bootstrap gui/\$(id -u) $PLIST_DST_CS"
   echo
-  echo "  💡 ALTERNATIVA: mover el proyecto fuera de Documents (ej. ~/CommunidadVIP/)"
-  echo "     y re-correr este setup desde la nueva ubicación."
+  echo "  ⚠️  OJO: NO sirve dar el permiso a /bin/bash. Es un binario de plataforma"
+  echo "     de Apple que no retiene el permiso como proceso responsable de TCC."
+  echo "     Por eso 'consolidar' corre como python DIRECTO (no vía bash)."
 else
-  echo "  ✓ Sin problemas de permisos detectados"
+  echo "  ✓ Acceso a Drive OK (consolidar leyó los Excels)"
 fi
 
 echo
