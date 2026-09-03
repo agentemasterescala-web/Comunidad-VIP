@@ -2060,10 +2060,21 @@ let pagoMesHasta = null;
 function pagoMes(iso){ return (iso || "").slice(0,7); }
 function pagoFmtDate(iso){ return (iso || "").slice(0,10); }
 function pagoUSD(n){ return "$" + (n||0).toLocaleString("es-CO", {minimumFractionDigits:2, maximumFractionDigits:2}); }
+// Etiqueta normalizada del tipo, SIEMPRE desde tipo_raw (fiable): subscription
+// → Nueva suscripción, topup → Top-up, renewal → Renovación. Así el filtro y el
+// gráfico tratan las renovaciones como un tipo propio (en pagos.json el `tipo`
+// de las renovaciones quedó como "renewal" crudo).
+function pagoTipoLabel(p){
+  const tr = ((p && p.tipo_raw) || "").toLowerCase();
+  if (tr === "topup") return "Top-up";
+  if (tr === "subscription") return "Nueva suscripción";
+  if (tr === "renewal") return "Renovación";
+  return (p && p.tipo) || "";
+}
 
 function pagoFilterList() {
   let list = (DATA.pagos || []).slice();
-  if (pagoTipoFilter !== "Todos") list = list.filter(p => p.tipo === pagoTipoFilter);
+  if (pagoTipoFilter !== "Todos") list = list.filter(p => pagoTipoLabel(p) === pagoTipoFilter);
   if (pagoProgramaFilter !== "Todos") list = list.filter(p => (p.programa || "Sin programa") === pagoProgramaFilter);
   if (pagoEstFilter === "Sí")  list = list.filter(p => p.estudiante === true);
   if (pagoEstFilter === "No")  list = list.filter(p => p.estudiante === false);
@@ -2102,7 +2113,7 @@ function renderPagosDashboard() {
   const list = pagoFilterList();
   const meses = [...new Set(all.map(p => pagoMes(p.fecha)))].filter(Boolean).sort();
   const programas = ["Todos","Master Escala","Iniciación Escala","Ambos","Sin programa"];
-  const tipos = ["Todos","Top-up","Nueva suscripción"];
+  const tipos = ["Todos","Nueva suscripción","Renovación","Top-up"];
   const estOpts = ["Todos","Sí","No"];
   // Totales sobre la lista filtrada
   const tot_pagos = list.length;
@@ -2111,8 +2122,9 @@ function renderPagosDashboard() {
   const tot_comision = list.reduce((s,p) => s + (p.comision_usd||0), 0);
   const tot_neto = list.reduce((s,p) => s + (p.neto_usd||0), 0);
   // Distribución por tipo (para % de mix)
-  const nSub = list.filter(p => p.tipo === "Nueva suscripción").length;
-  const nTop = list.filter(p => p.tipo === "Top-up").length;
+  const nSub = list.filter(p => pagoTipoLabel(p) === "Nueva suscripción").length;
+  const nRen = list.filter(p => pagoTipoLabel(p) === "Renovación").length;
+  const nTop = list.filter(p => pagoTipoLabel(p) === "Top-up").length;
   return `
     <div class="card p-4 mb-4">
       <h2 class="text-base font-bold neon-cyan mb-1">💰 App Master Escala — Pagos</h2>
@@ -2121,7 +2133,7 @@ function renderPagosDashboard() {
 
     <!-- STAT CARDS · reactivos al filtro -->
     <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
-      ${statCard("Total transacciones", tot_pagos, `${nSub} suscripciones · ${nTop} top-ups`, "neon-cyan")}
+      ${statCard("Total transacciones", tot_pagos, `${nSub} nuevas · ${nRen} renovaciones · ${nTop} top-ups`, "neon-cyan")}
       ${statCard("Créditos vendidos", tot_creditos, "En transacciones filtradas", "neon-violet")}
       ${statCard("Bruto USD", pagoUSD(tot_bruto), "Antes de comisión Stripe", "neon-green")}
       ${statCard("Comisión Stripe", pagoUSD(tot_comision), `${tot_bruto>0?(tot_comision/tot_bruto*100).toFixed(1):0}% del bruto`, "neon-yellow")}
@@ -2132,7 +2144,7 @@ function renderPagosDashboard() {
     <div class="card p-4 mb-4">
       <div class="flex justify-between items-baseline mb-2">
         <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Ingresos por mes (neto USD)</h3>
-        <div class="text-[10px] text-slate-500">Barras apiladas · verde=suscripciones · violeta=top-ups</div>
+        <div class="text-[10px] text-slate-500">Barras apiladas · verde=suscripciones · ámbar=renovaciones · violeta=top-ups</div>
       </div>
       <div style="height:260px"><canvas id="pagos-chart"></canvas></div>
     </div>
@@ -2200,7 +2212,7 @@ function renderPagosDashboard() {
                 <td class="text-slate-200">${tc(p.nombre)||'—'}</td>
                 <td class="text-center">${p.estudiante ? '<span class="pill bg-emerald-500/20 text-emerald-300 border-emerald-500/40">Sí</span>' : '<span class="text-slate-600">No</span>'}</td>
                 <td class="text-center"><span class="pill bg-white/5 border-white/10 text-slate-300">${PROG_SHORT[p.programa]||p.programa||'—'}</span></td>
-                <td class="text-center"><span class="pill ${p.tipo==='Top-up'?'bg-violet-500/20 text-violet-300 border-violet-500/40':'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'}">${p.tipo}</span></td>
+                <td class="text-center"><span class="pill ${pagoTipoLabel(p)==='Top-up'?'bg-violet-500/20 text-violet-300 border-violet-500/40':pagoTipoLabel(p)==='Renovación'?'bg-amber-500/20 text-amber-300 border-amber-500/40':'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'}">${pagoTipoLabel(p)}</span></td>
                 <td class="text-slate-300">${p.descripcion||'—'}</td>
                 <td class="text-right font-mono text-slate-200">${fmt(p.creditos)}</td>
                 <td class="text-right font-mono text-slate-200">${pagoUSD(p.bruto_usd)}</td>
@@ -2294,11 +2306,13 @@ function drawPagosChart() {
   list.forEach(p => {
     const m = pagoMes(p.fecha);
     if (!m) return;
-    if (!byMonth[m]) byMonth[m] = { "Nueva suscripción":0, "Top-up":0 };
-    byMonth[m][p.tipo] = (byMonth[m][p.tipo]||0) + (p.neto_usd||0);
+    if (!byMonth[m]) byMonth[m] = { "Nueva suscripción":0, "Renovación":0, "Top-up":0 };
+    const t = pagoTipoLabel(p);
+    byMonth[m][t] = (byMonth[m][t]||0) + (p.neto_usd||0);
   });
   const labels = Object.keys(byMonth).sort();
   const dataSub = labels.map(m => +(byMonth[m]["Nueva suscripción"] || 0).toFixed(2));
+  const dataRen = labels.map(m => +(byMonth[m]["Renovación"] || 0).toFixed(2));
   const dataTop = labels.map(m => +(byMonth[m]["Top-up"] || 0).toFixed(2));
   _pagosChart = new Chart(canvas.getContext('2d'), {
     type: 'bar',
@@ -2306,6 +2320,7 @@ function drawPagosChart() {
       labels: labels,
       datasets: [
         { label: 'Nueva suscripción', data: dataSub, backgroundColor: 'rgba(34,197,94,.75)', borderRadius: 4 },
+        { label: 'Renovación',        data: dataRen, backgroundColor: 'rgba(251,191,36,.75)', borderRadius: 4 },
         { label: 'Top-up',            data: dataTop, backgroundColor: 'rgba(167,139,250,.75)', borderRadius: 4 },
       ]
     },
