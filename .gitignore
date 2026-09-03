@@ -19,10 +19,23 @@ datos/procesados/maestro_emails.xlsx
 datos/procesados/clasificacion_usuarios.xlsx
 datos/procesados/dashboard.html
 datos/procesados/writeback_run.log
+# JSONs con PII (nombres/emails/teléfonos) que el pipeline regenera solo.
+datos/procesados/pagos.json
+datos/procesados/escalafon.json
 
 # ── Planes/exports con PII (emails, teléfonos, nombres) ────────
 datos/procesados/plan_vip_sin_form.csv
 datos/procesados/*.csv
+
+# ── Estado runtime de los pipelines (no versionar) ─────────────
+datos/procesados/.dashboard_content_hash
+datos/procesados/.refrescar_last_attempt
+
+# ── Backups locales (incluye copias de .env con secretos) ──────
+*.bak
+*.bak-*
+*.bak2-*
+**/.env.bak*
 
 # ── Logs ───────────────────────────────────────────────────────
 **/logs/
@@ -32,6 +45,8 @@ datos/procesados/*.csv
 **/.pipeline.lock
 **/.dashboard.lock
 **/.publish.lock
+**/.publish_light.lock
+**/.*.lock
 
 # ── Worktree de publicación (rama gh-pages) ────────────────────
 _publish/
