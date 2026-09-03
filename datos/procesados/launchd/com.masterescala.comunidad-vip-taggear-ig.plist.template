@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.masterescala.comunidad-vip-taggear-ig</string>
+
+    <!-- Detecta cuál IG (Iván Caicedo vs Escala Academy) escribió al contacto,
+         leyendo meta.ig.pageId de los mensajes, y le agrega el tag correspondiente.
+         Idempotente y no destructivo. Solo procesa contactos con dateUpdated en
+         las últimas 2 horas (según el dump local ghl_contacts_raw.json, que la
+         rutina 'refrescar' actualiza cada 10 min).
+         Corre python directo (no vía bash) por consistencia con 'consolidar'. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__INSTALL_DIR__/taggear_ig_source.py</string>
+        <string>--hours</string>
+        <string>2</string>
+        <string>--live</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__INSTALL_DIR__</string>
+
+    <!-- Cada 10 minutos. Retraso máximo entre "usuario escribe por IG" y
+         "queda taggueado" ≈ 10 min. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>4</integer></dict>
+        <dict><key>Minute</key><integer>14</integer></dict>
+        <dict><key>Minute</key><integer>24</integer></dict>
+        <dict><key>Minute</key><integer>34</integer></dict>
+        <dict><key>Minute</key><integer>44</integer></dict>
+        <dict><key>Minute</key><integer>54</integer></dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__INSTALL_DIR__/logs/launchd-taggear-ig.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__INSTALL_DIR__/logs/launchd-taggear-ig.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
