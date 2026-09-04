@@ -5,9 +5,16 @@ maestra: email -> {mes: pedidos, pais, nombre, telefono}.
 
 Métrica de pedidos = ENTREGADOS + DEVOLUCIONES (decisión del usuario).
 Salida: maestro_emails.xlsx con una fila por (email, país, mes, pedidos).
+
+Resiliencia (para no perder meses en silencio):
+  · Cada Excel se materializa desde Google Drive (lee los bytes) y se reintenta
+    con backoff — un archivo "solo en la nube" ya no tira la corrida.
+  · Guarda de regresión: si un archivo falla o un mes que el maestro anterior
+    tenía desaparece o cae >50%, NO se sobrescribe el maestro (falla cerrado,
+    sale con código 2) para conservar el último bueno.
 """
-import os, re, glob, unicodedata
-from collections import defaultdict
+import os, re, glob, unicodedata, io, time
+from collections import defaultdict, Counter
 import openpyxl
 
 # Paths portables — todo se resuelve relativo a la ubicación de este script.
@@ -235,8 +242,55 @@ def parse_sheet(ws, country, month_label):
         })
     return out
 
+def load_workbook_resiliente(fn, retries=4):
+    """Abre un .xlsx tolerando archivos 'solo en la nube' de Google Drive.
+
+    Fuerza la materializacion leyendo TODOS los bytes (dispara la descarga del
+    File Provider de Drive) y carga desde memoria; reintenta con backoff si falla
+    (descarga a medias / I/O transitorio). Sin esto, un archivo no materializado
+    tira openpyxl y el mes se caia del maestro en silencio."""
+    last = None
+    for intento in range(retries):
+        try:
+            with open(fn, "rb") as f:
+                data = f.read()
+            return openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            time.sleep(2 ** intento)
+    raise last
+
+
+def meses_conteo_maestro(path):
+    """{mes: nº de filas} del maestro existente (hoja MAESTRO). {} si no existe
+    o no se puede leer. Sirve de baseline para la guarda de regresion."""
+    if not os.path.isfile(path):
+        return {}
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb["MAESTRO"] if "MAESTRO" in wb.sheetnames else wb.active
+        it = ws.iter_rows(values_only=True)
+        hdr = next(it, None)
+        idx = None
+        if hdr:
+            for i, h in enumerate(hdr):
+                if str(h).strip().lower() == "mes":
+                    idx = i
+                    break
+        c = Counter()
+        if idx is not None:
+            for r in it:
+                if idx < len(r) and r[idx]:
+                    c[r[idx]] += 1
+        wb.close()
+        return dict(c)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def main():
     all_records = []
+    failed_files = []   # (basename, mes, error) de Excels que no se pudieron abrir
     files_processed = 0
     for path, month_label in MONTH_MAP.items():
         files = sorted(glob.glob(os.path.join(path, "*.xlsx")))
@@ -245,9 +299,10 @@ def main():
             files_processed += 1
             print(f"[{files_processed}] {os.path.basename(fn)}")
             try:
-                wb = openpyxl.load_workbook(fn, read_only=True, data_only=True)
+                wb = load_workbook_resiliente(fn)
             except Exception as e:
-                print(f"  ✗ error: {e}")
+                print(f"  ✗ error tras reintentos: {e}")
+                failed_files.append((os.path.basename(fn), month_label, str(e)))
                 continue
             consolidated = is_consolidated_workbook(wb, fn)
             if consolidated:
@@ -311,8 +366,39 @@ def main():
         print("   maestro_emails.xlsx NO se sobrescribe para no perder datos.")
         raise SystemExit(1)
 
-    # Escribir maestro
     out_path = os.path.join(OUT_DIR, "maestro_emails.xlsx")
+
+    # ── Guarda de regresión: no sobrescribir un maestro bueno con datos
+    # incompletos. Compara el build nuevo contra el maestro anterior; si algún
+    # Excel falló al abrir, o un mes que existía desaparece / cae >50%, aborta y
+    # conserva el último maestro bueno (falla cerrado). Típico cuando un archivo
+    # de Drive quedó "solo en la nube" al correr el agente.
+    nuevo_por_mes = Counter(mes for (_e, _p, mes) in agg.keys())
+    prev_por_mes = meses_conteo_maestro(out_path)
+    problemas = []
+    if failed_files:
+        problemas.append(
+            f"{len(failed_files)} archivo(s) no se pudieron abrir: "
+            + ", ".join(f"{n} [{m}]" for n, m, _ in failed_files))
+    for mes, prev_n in sorted(prev_por_mes.items()):
+        nuevo_n = nuevo_por_mes.get(mes, 0)
+        if nuevo_n == 0:
+            problemas.append(f"mes {mes}: estaba con {prev_n} filas y ahora 0 (desapareció)")
+        elif prev_n >= 20 and nuevo_n < prev_n * 0.5:
+            problemas.append(f"mes {mes}: cayó de {prev_n} a {nuevo_n} filas (<50%)")
+    if problemas and prev_por_mes:
+        print("\n❌ Consolidación INCOMPLETA — NO se sobrescribe el maestro:")
+        for p in problemas:
+            print(f"   • {p}")
+        print("   Causa típica: Excels de Google Drive 'solo en la nube' no")
+        print("   materializados al correr. Se conserva el último maestro bueno.")
+        raise SystemExit(2)
+    elif problemas:
+        print("\n⚠ Advertencias (sin maestro previo que proteger, se continúa):")
+        for p in problemas:
+            print(f"   • {p}")
+
+    # Escribir maestro
     wb_out = openpyxl.Workbook()
     ws = wb_out.active
     ws.title = "MAESTRO"
