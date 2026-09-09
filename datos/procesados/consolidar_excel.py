@@ -127,13 +127,16 @@ def parse_sheet(ws, country, month_label):
     #                      líder/gestor del grupo (varias filas comparten Email,
     #                      así que usar "Email" mete doble/multi-conteo).
     #   • Jun 2026:        solo "email" con el correo.
-    #   • Jul 2026+:       "Usuario" con el NOMBRE + "Email" con el correo.
+    #   • Jul 2026:        "Usuario" con el NOMBRE + "Email" con el correo.
+    #   • Ago 2026+:       "Usuario" con el NOMBRE + "Correo" con el correo
+    #                      (la columna del email cambió de nombre a "Correo").
     # Regla: si existen ambas columnas, muestreamos las primeras filas y usamos
     # la que tenga MÁS emails únicos válidos (el correo del vendedor cambia
-    # fila a fila; el email del líder se repite).
+    # fila a fila; el email del líder se repite; y "Usuario" trae el nombre,
+    # sin '@', así que nunca gana).
     col_email = None
     cand_usuarios = col_index(hdr, {"usuarios","usuario"})
-    cand_email = col_index(hdr, {"email"})
+    cand_email = col_index(hdr, {"email","correo"})
     if cand_usuarios is None:
         col_email = cand_email
     elif cand_email is None:
@@ -156,6 +159,11 @@ def parse_sheet(ws, country, month_label):
         col_email = cand_usuarios if n_u >= n_e else cand_email
     col_nombre = col_index(hdr, {"nombre"})
     col_tel = col_index(hdr, {"telefono"})
+    # Formatos Jul/Ago 2026+: el NOMBRE viene en la columna "Usuario" (el correo
+    # va en "Email"/"Correo"). Si no hay columna "nombre" explícita y "usuario(s)"
+    # NO se usó como email, tómala como nombre.
+    if col_nombre is None and cand_usuarios is not None and cand_usuarios != col_email:
+        col_nombre = cand_usuarios
     # Si nombre/telefono no estan en el header principal, pueden venir como sub-headers
     # en la siguiente fila (caso Feb). Detectar esto:
     next_row = None
