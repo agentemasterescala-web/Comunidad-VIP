@@ -18,7 +18,7 @@ Lógica de clasificación:
   - Tiers (suma top-3): Bronce 30-99, Plata 100-299, Oro 300-999,
                        Platino 1.000-4.999, Diamante 15.000+ (Opción A)
 """
-import os, json, sys, time, argparse, urllib.request, urllib.error
+import os, json, sys, time, argparse, re, urllib.request, urllib.error
 from collections import defaultdict
 import openpyxl
 
@@ -196,6 +196,42 @@ def remove_tags(cid, tags):
                 {"tags": list(tags)})
 
 
+# ── Ventas por mes (Opción A): un custom field numérico por mes en GHL, más un
+# 'Ventas total acumulado'. Se DESCUBREN por nombre ('Ventas YYYY-MM'), así no
+# hay que hardcodear IDs: creas el campo en GHL y el pipeline lo llena solo.
+# El listado de custom fields exige UA de navegador (Cloudflare bloquea otros).
+_BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+_VENTAS_MES_RE = re.compile(r"^\s*ventas\s+(\d{4})-(\d{2})\s*$", re.IGNORECASE)
+
+
+def list_custom_fields():
+    url = f"https://services.leadconnectorhq.com/locations/{LOC}/customFields"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {TOK}", "Version": "2021-07-28",
+        "Accept": "application/json", "User-Agent": _BROWSER_UA,
+    })
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read() or "{}").get("customFields", [])
+
+
+def discover_ventas_fields():
+    """({'YYYY-MM': field_id, ...}, total_id|None) leídos de GHL por nombre:
+    'Ventas YYYY-MM' (numérico) y 'Ventas total acumulado'."""
+    meses, total_id = {}, None
+    try:
+        for f in list_custom_fields():
+            nm = (f.get("name") or "").strip()
+            m = _VENTAS_MES_RE.match(nm)
+            if m:
+                meses[f"{m.group(1)}-{m.group(2)}"] = f.get("id")
+            elif nm.lower() == "ventas total acumulado":
+                total_id = f.get("id")
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ No se pudieron leer los campos 'Ventas' de GHL: {e}")
+    return meses, total_id
+
+
 def extract_tiendas(contact):
     cf = {f["id"]: f.get("value") for f in contact.get("customFields", [])}
     seen = {}
@@ -221,6 +257,22 @@ def load_maestro():
         db[em].append({"pais": r[idx["pais"]], "mes": r[idx["mes"]],
                        "pedidos": r[idx["pedidos"]] or 0})
     return db
+
+
+def pedidos_por_mes_todos(contact, maestro):
+    """Pedidos por mes de TODOS los meses del maestro (no solo la ventana de 5),
+    con la misma suma que calc_user: tiendas + correo principal, sin duplicar."""
+    ped = defaultdict(int)
+    tienda_emails = set()
+    for t in extract_tiendas(contact):
+        tienda_emails.add(t["email"])
+        for mr in maestro.get(t["email"], []):
+            ped[mr["mes"]] += mr["pedidos"]
+    emp = (contact.get("email") or "").strip().lower()
+    if emp and emp not in tienda_emails and emp in maestro:
+        for mr in maestro.get(emp, []):
+            ped[mr["mes"]] += mr["pedidos"]
+    return dict(ped)
 
 
 def calc_user(contact, maestro):
@@ -252,7 +304,8 @@ def calc_user(contact, maestro):
     }
 
 
-def build_updates(contact, calc):
+def build_updates(contact, calc, ped_all=None, ventas_fields=None,
+                  ventas_total_id=None, maestro_months=None):
     """Devuelve dict con plan de cambios. No ejecuta. Marca is_noop=True
     cuando todos los valores nuevos coinciden con los actuales en GHL."""
     cid = contact["id"]
@@ -291,6 +344,20 @@ def build_updates(contact, calc):
         {"id": F["historial"],        "field_value": new_hist},
     ]
 
+    # Ventas por mes (persistentes) + total acumulado, por vendedor. Solo los
+    # meses que existen en el maestro Y tienen su campo creado en GHL; los meses
+    # a futuro (campo creado pero sin data) se dejan intactos.
+    ventas_extra = []
+    if ventas_fields and ped_all is not None:
+        for mes in (maestro_months or []):
+            fid = ventas_fields.get(mes)
+            if fid:
+                ventas_extra.append({"id": fid, "field_value": ped_all.get(mes, 0)})
+        if ventas_total_id:
+            ventas_extra.append({"id": ventas_total_id,
+                                 "field_value": sum(ped_all.values())})
+    custom_fields_payload = custom_fields_payload + ventas_extra
+
     new_tag = TIER_TAG[calc["nivel"]]
     tags_to_remove = [t for t in current_tags if t in ALL_VIP_TAGS and t != new_tag]
     tags_to_add = [new_tag] if new_tag not in current_tags else []
@@ -311,7 +378,8 @@ def build_updates(contact, calc):
         and str(current_v3 or "0") == str(new_v3)
     )
     tags_match = (not tags_to_add) and (not tags_to_remove)
-    is_noop = fields_match and tags_match
+    ventas_match = all(_same_num(cf_now.get(x["id"]), x["field_value"]) for x in ventas_extra)
+    is_noop = fields_match and tags_match and ventas_match
 
     return {
         "contact_id": cid,
@@ -368,6 +436,11 @@ def main():
     with open(RAW) as fp:
         contacts = json.load(fp)
     maestro = load_maestro()
+    maestro_months = sorted({mr["mes"] for rows in maestro.values() for mr in rows})
+    ventas_fields, ventas_total_id = discover_ventas_fields()
+    print(f"  Campos 'Ventas YYYY-MM' en GHL: {len(ventas_fields)}"
+          f"  ·  total acumulado: {'sí' if ventas_total_id else 'no'}"
+          f"  ·  meses en maestro: {len(maestro_months)}")
 
     if args.contact_id:
         contacts = [c for c in contacts if c.get("id") == args.contact_id]
@@ -387,7 +460,8 @@ def main():
         if not tiendas and em_p not in maestro:
             continue
         calc = calc_user(c, maestro)
-        plan = build_updates(c, calc)
+        ped_all = pedidos_por_mes_todos(c, maestro)
+        plan = build_updates(c, calc, ped_all, ventas_fields, ventas_total_id, maestro_months)
 
         if plan["is_noop"]:
             noops += 1
