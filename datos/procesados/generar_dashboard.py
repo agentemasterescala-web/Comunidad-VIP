@@ -797,6 +797,65 @@ def compute_all():
     # Ordenar por nombre del contacto B (el que tiene la tienda)
     met_duplicados.sort(key=lambda x: (x["nombre"] or "").lower())
 
+    # ── Histórico de ventas: TODOS los meses capturados, por vendedor. VIP =
+    # empatado a un contacto GHL (persona, combinando sus tiendas + correo
+    # principal); los vendedores Dropi sin contacto van como no-VIP. El nivel se
+    # calcula sobre la ventana (últimos 5 meses) para que coincida con el
+    # escalafón. La tabla crece 1 columna por cada mes nuevo del maestro.
+    historico_meses = sorted({mr["mes"] for rows in maestro.values() for mr in rows})
+    historico_rows = []
+    _hist_claimed = set()
+    for c in contacts:
+        _emails, _paises = set(), set()
+        for t in extract_tiendas(c):
+            _emails.add(t["email"])
+            if t["pais"]:
+                _paises.add(t["pais"])
+        _emp = (c.get("email") or "").strip().lower()
+        if _emp and _emp not in _emails and _emp in maestro:
+            _emails.add(_emp)
+        _ped = {m: 0 for m in historico_meses}
+        _tiene = False
+        for em in _emails:
+            if em in maestro:
+                _hist_claimed.add(em)
+                for mr in maestro[em]:
+                    _ped[mr["mes"]] += mr["pedidos"]
+                    if mr.get("pais"):
+                        _paises.add(mr["pais"])
+                    _tiene = True
+        if not _tiene:
+            continue
+        historico_rows.append({
+            "nombre": c.get("contactName") or "",
+            "email": _emp or (sorted(_emails)[0] if _emails else ""),
+            "pais": ", ".join(sorted({pais_canonico(p) for p in _paises if p})) or "—",
+            "vip": True,
+            "nivel": clasificar_nivel([_ped[m] for m in months]),
+            "meses": _ped,
+            "total": sum(_ped.values()),
+        })
+    # Vendedores Dropi no reclamados por ningún VIP → no-VIP.
+    _por_email, _meta_em = {}, {}
+    for em, rows in maestro.items():
+        if em in _hist_claimed:
+            continue
+        d = _por_email.setdefault(em, {m: 0 for m in historico_meses})
+        for mr in rows:
+            d[mr["mes"]] += mr["pedidos"]
+            if em not in _meta_em or (not _meta_em[em][0] and mr.get("nombre")):
+                _meta_em[em] = (mr.get("nombre") or "", mr.get("pais") or "")
+    for em, _ped in _por_email.items():
+        _tot = sum(_ped.values())
+        if _tot <= 0:
+            continue
+        _nom, _pais = _meta_em.get(em, ("", ""))
+        historico_rows.append({
+            "nombre": _nom, "email": em, "pais": pais_canonico(_pais) or "—",
+            "vip": False, "nivel": "", "meses": _ped, "total": _tot,
+        })
+    historico_rows.sort(key=lambda r: -r["total"])
+
     return {
         "meta": {
             "ultimo_mes": LATEST,
@@ -866,6 +925,8 @@ def compute_all():
             "duplicados_contactos_unicos": len({d["cid"] for d in met_duplicados}),
         },
         "pagos": load_pagos(),
+        "historico_ventas": historico_rows,
+        "historico_meses": historico_meses,
     }
 
 
@@ -1134,6 +1195,7 @@ const CATEGORIES = [
   {id:"pendientes",       label:"📝 Pendientes por formulario"},
   {id:"todos_vip",        label:"⭐ Todos VIP"},
   {id:"otros",            label:"📦 Otros"},
+  {id:"historico_ventas", label:"📈 Histórico ventas"},
   {id:"app_master_escala",label:"💰 App Master Escala"},
   {id:"config",           label:"📋 Reglas"},
 ];
@@ -1153,6 +1215,9 @@ const TABS_BY_CAT = {
     {id:"otros_resumen",  label:"📊 Resumen"},
     {id:"met_dropi_ghl",  label:"👻 Lista (Dropi sin GHL)"},
     {id:"met_duplicados", label:"🔁 Posibles duplicados"},
+  ],
+  "historico_ventas": [
+    {id:"hist_ventas", label:"📈 Histórico"},
   ],
   "app_master_escala": [
     {id:"pagos_dashboard", label:"💰 Pagos"},
@@ -2338,6 +2403,175 @@ function drawPagosChart() {
   });
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// HISTÓRICO DE VENTAS · todos los meses capturados, por vendedor (VIP y no VIP)
+// Data: DATA.historico_ventas + DATA.historico_meses (desde generar_dashboard.py)
+// ───────────────────────────────────────────────────────────────────────────
+let histVipFilter = "Todos";     // Todos / VIP / No VIP
+let histNivelFilter = "Todos";
+let histPaisFilter = "Todos";
+let histSearch = "";
+let histSortCol = "total";       // total | nombre | tendencia
+let histSortDir = "desc";
+
+function histSortArrowH(col){
+  if (histSortCol !== col) return " <span class='text-slate-600'>⇅</span>";
+  return histSortDir === "asc" ? " ▲" : " ▼";
+}
+
+// Tendencia: suma de los últimos 3 meses vs los 3 anteriores (alineado al top-3
+// del escalafón). Devuelve % de cambio y dirección (up/down/flat).
+function histTrend(meses){
+  const M = DATA.historico_meses || [];
+  const n = M.length;
+  const sum = (arr) => arr.reduce((s,m) => s + (meses[m]||0), 0);
+  const last3 = sum(M.slice(Math.max(0, n-3)));
+  const prev3 = sum(M.slice(Math.max(0, n-6), Math.max(0, n-3)));
+  let pct, dir;
+  if (prev3 === 0) { pct = last3 > 0 ? 100 : 0; dir = last3 > 0 ? 'up' : 'flat'; }
+  else { pct = (last3 - prev3) / prev3 * 100; dir = pct > 5 ? 'up' : (pct < -5 ? 'down' : 'flat'); }
+  return { last3, prev3, pct, dir };
+}
+
+function histFilterList(){
+  let list = (DATA.historico_ventas || []).slice();
+  if (histVipFilter === "VIP") list = list.filter(r => r.vip);
+  else if (histVipFilter === "No VIP") list = list.filter(r => !r.vip);
+  if (histNivelFilter !== "Todos") list = list.filter(r => (r.nivel || "—") === histNivelFilter);
+  if (histPaisFilter !== "Todos") list = list.filter(r => (r.pais || "").split(", ").includes(histPaisFilter));
+  if (histSearch) {
+    const s = histSearch.toLowerCase();
+    list = list.filter(r => (r.nombre||"").toLowerCase().includes(s) || (r.email||"").toLowerCase().includes(s));
+  }
+  const dir = histSortDir === "asc" ? 1 : -1;
+  list.sort((a,b) => {
+    if (histSortCol === "tendencia") return dir * (histTrend(a.meses).pct - histTrend(b.meses).pct);
+    const va = a[histSortCol], vb = b[histSortCol];
+    if (typeof va === "number" && typeof vb === "number") return dir * (va - vb);
+    return dir * String(va||"").localeCompare(String(vb||""));
+  });
+  return list;
+}
+
+function renderHistoricoVentas(){
+  const M = DATA.historico_meses || [];
+  const all = DATA.historico_ventas || [];
+  if (!all.length) {
+    return `<div class="card p-8 text-center"><h2 class="text-lg neon-cyan mb-3">📈 Histórico de ventas</h2>
+      <p class="text-slate-400">Aún no hay datos de ventas en el maestro.</p></div>`;
+  }
+  const list = histFilterList();
+  const paises = ["Todos", ...[...new Set(all.flatMap(r => (r.pais||"").split(", ").filter(x => x && x !== "—")))].sort()];
+  const niveles = ["Todos", ...TIER_ORDER.filter(t => all.some(r => r.nivel === t))];
+  const nVip = list.filter(r => r.vip).length;
+  const totPed = list.reduce((s,r) => s + (r.total||0), 0);
+  const MAXROWS = 1500;
+  return `
+    <div class="card p-4 mb-4">
+      <h2 class="text-base font-bold neon-cyan mb-1">📈 Histórico de ventas — todos los meses</h2>
+      <div class="text-xs text-slate-500">Pedidos (entregados + devoluciones) por vendedor, de ${M[0]} a ${M[M.length-1]}. <b>VIP</b> = empatado a un contacto en GHL (con su nivel). Se agrega 1 columna por cada mes nuevo del maestro.</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      ${statCard("Vendedores", fmt(list.length), `${fmt(nVip)} VIP · ${fmt(list.length-nVip)} no VIP`, "neon-cyan")}
+      ${statCard("Meses", M.length, `${M[0]} → ${M[M.length-1]}`, "neon-violet")}
+      ${statCard("Pedidos acumulados", fmt(totPed), "En la selección", "neon-green")}
+    </div>
+    <div class="card p-4 mb-4">
+      <div class="flex flex-wrap items-center gap-3 mb-3">
+        <input id="hist-search" type="text" placeholder="Buscar por nombre o email..."
+               class="flex-1 min-w-[260px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
+               value="${histSearch.replace(/"/g,'&quot;')}">
+        <button id="hist-csv" class="text-[11px] px-3 py-2 rounded-lg bg-cyan-600/30 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-600/40">⬇ CSV</button>
+        <button id="hist-xlsx" class="text-[11px] px-3 py-2 rounded-lg bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-600/40">⬇ XLSX</button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">VIP:</div>
+        ${["Todos","VIP","No VIP"].map(v => `<button data-histvip="${v}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${histVipFilter===v?'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${v}</button>`).join('')}
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">Nivel:</div>
+        ${niveles.map(nv => `<button data-histnivel="${nv}" class="text-[11px] px-3 py-1.5 rounded-lg font-medium ${histNivelFilter===nv?'bg-violet-600/30 text-violet-200 border border-violet-500/40':'bg-white/5 text-slate-400 border border-white/5 hover:text-slate-200'}">${nv}</button>`).join('')}
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 w-20">País:</div>
+        <select id="hist-pais" class="bg-black/40 border border-white/10 rounded-lg px-2 py-1.5 text-xs">
+          ${paises.map(p => `<option value="${p}" ${histPaisFilter===p?'selected':''}>${p}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 mb-2">Mostrando ${Math.min(list.length,MAXROWS)} de ${list.length} vendedores · <b>Tend. 3M</b> = últimos 3 meses vs los 3 anteriores</div>
+      <div class="overflow-x-auto scrollable">
+        <table class="w-full text-xs">
+          <thead class="text-[10px] text-slate-500 uppercase tracking-wider border-b border-white/10 sticky top-0 bg-[#06091a] z-10">
+            <tr>
+              <th data-histsort="nombre" class="text-left py-2 cursor-pointer hover:text-cyan-300 select-none">Vendedor${histSortArrowH('nombre')}</th>
+              <th class="text-left">País</th>
+              <th class="text-center">VIP</th>
+              <th class="text-center">Nivel</th>
+              ${M.map(m => `<th class="text-right whitespace-nowrap">${m.slice(5)}/${m.slice(2,4)}</th>`).join('')}
+              <th data-histsort="total" class="text-right cursor-pointer hover:text-cyan-300 select-none">Total${histSortArrowH('total')}</th>
+              <th data-histsort="tendencia" class="text-right cursor-pointer hover:text-cyan-300 select-none">Tend. 3M${histSortArrowH('tendencia')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.slice(0,MAXROWS).map(r => {
+              const t = histTrend(r.meses);
+              const arrow = t.dir==='up'?'<span class="text-emerald-400">↑</span>':t.dir==='down'?'<span class="text-rose-400">↓</span>':'<span class="text-slate-500">→</span>';
+              const pctTxt = (t.pct>0?'+':'') + t.pct.toFixed(0) + '%';
+              return `<tr class="hover-row border-b border-white/5">
+                <td class="py-2 text-slate-200">${tc(r.nombre)||'<span class="text-slate-600">(sin nombre)</span>'}<div class="text-[10px] text-slate-500">${r.email||''}</div></td>
+                <td class="text-slate-400">${r.pais||'—'}</td>
+                <td class="text-center">${r.vip?'<span class="pill bg-cyan-500/20 text-cyan-300 border-cyan-500/40">VIP</span>':'<span class="text-slate-600">—</span>'}</td>
+                <td class="text-center">${r.nivel?`<span class="pill bg-white/5 border-white/10 text-slate-300">${r.nivel}</span>`:'<span class="text-slate-600">—</span>'}</td>
+                ${M.map(m => `<td class="text-right font-mono ${(r.meses[m]||0)>0?'text-slate-200':'text-slate-700'}">${fmt(r.meses[m]||0)}</td>`).join('')}
+                <td class="text-right font-mono font-semibold text-emerald-300">${fmt(r.total)}</td>
+                <td class="text-right font-mono whitespace-nowrap">${arrow} ${pctTxt}</td>
+              </tr>`;
+            }).join('')}
+            ${list.length>MAXROWS?`<tr><td colspan="${M.length+6}" class="text-center text-slate-500 py-3">... y ${list.length-MAXROWS} más (usa CSV/XLSX para ver todos)</td></tr>`:''}
+            ${list.length===0?`<tr><td colspan="${M.length+6}" class="text-center text-slate-500 py-6">— sin resultados —</td></tr>`:''}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function wireHistoricoVentas(){
+  document.querySelectorAll('[data-histvip]').forEach(b => b.onclick = () => { histVipFilter = b.dataset.histvip; render(); });
+  document.querySelectorAll('[data-histnivel]').forEach(b => b.onclick = () => { histNivelFilter = b.dataset.histnivel; render(); });
+  document.querySelectorAll('th[data-histsort]').forEach(th => th.onclick = () => {
+    const col = th.dataset.histsort;
+    if (histSortCol === col) histSortDir = histSortDir === 'asc' ? 'desc' : 'asc';
+    else { histSortCol = col; histSortDir = 'desc'; }
+    render();
+  });
+  const inp = document.getElementById('hist-search');
+  if (inp) { inp.oninput = e => { histSearch = e.target.value; render(); }; inp.focus(); inp.setSelectionRange(histSearch.length, histSearch.length); }
+  const sp = document.getElementById('hist-pais');
+  if (sp) sp.onchange = e => { histPaisFilter = e.target.value; render(); };
+  function _rows(){
+    const M = DATA.historico_meses || [];
+    const out = [["Vendedor","Email","Pais","VIP","Nivel", ...M, "Total", "Tend_3M_%"]];
+    histFilterList().forEach(r => {
+      const t = histTrend(r.meses);
+      out.push([r.nombre||"", r.email||"", r.pais||"", r.vip?"VIP":"No", r.nivel||"",
+                ...M.map(m => r.meses[m]||0), r.total||0, (t.pct>0?'+':'') + t.pct.toFixed(0) + '%']);
+    });
+    return out;
+  }
+  const _fn = (ext) => "Historico ventas - " +
+    new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Bogota',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()) + "." + ext;
+  const bc = document.getElementById('hist-csv');
+  if (bc) bc.onclick = () => downloadCSV(_fn('csv'), _rows());
+  const bx = document.getElementById('hist-xlsx');
+  if (bx) bx.onclick = () => {
+    bx.disabled = true; const o = bx.textContent; bx.textContent = 'Generando…';
+    Promise.resolve().then(() => downloadXLSX(_fn('xlsx'), _rows(), "Histórico"))
+      .finally(() => setTimeout(() => { bx.disabled = false; bx.textContent = o; }, 1200));
+  };
+}
+
 function render() {
   const main = document.getElementById("main-content");
   switch (currentTab) {
@@ -2356,6 +2590,8 @@ function render() {
     case "consulta":main.innerHTML = renderConsulta(); wireConsulta(); break;
     // App Master Escala
     case "pagos_dashboard": main.innerHTML = renderPagosDashboard(); wirePagosDashboard(); drawPagosChart(); break;
+    // Histórico de ventas (todos los meses)
+    case "hist_ventas": main.innerHTML = renderHistoricoVentas(); wireHistoricoVentas(); break;
   }
 }
 
