@@ -2501,32 +2501,33 @@ function renderHistoricoVentas(){
     </div>
     <div class="card p-4">
       <div class="text-xs text-slate-500 mb-2">Mostrando ${Math.min(list.length,MAXROWS)} de ${list.length} vendedores · <b>Tend. 3M</b> = últimos 3 meses vs los 3 anteriores</div>
-      <div class="overflow-x-auto scrollable">
-        <table class="w-full text-xs">
-          <thead class="text-[10px] text-slate-500 uppercase tracking-wider border-b border-white/10 sticky top-0 bg-[#06091a] z-10">
+      <div class="overflow-x-auto scrollable" style="-webkit-overflow-scrolling:touch">
+        <table class="text-xs" style="min-width:max-content;border-collapse:separate;border-spacing:0">
+          <thead class="text-[10px] text-slate-500 uppercase tracking-wider sticky top-0 bg-[#06091a] z-10">
             <tr>
-              <th data-histsort="nombre" class="text-left py-2 cursor-pointer hover:text-cyan-300 select-none">Vendedor${histSortArrowH('nombre')}</th>
-              <th class="text-left">País</th>
-              <th class="text-center">VIP</th>
-              <th class="text-center">Nivel</th>
-              ${M.map(m => `<th class="text-right whitespace-nowrap">${m.slice(5)}/${m.slice(2,4)}</th>`).join('')}
-              <th data-histsort="total" class="text-right cursor-pointer hover:text-cyan-300 select-none">Total${histSortArrowH('total')}</th>
-              <th data-histsort="tendencia" class="text-right cursor-pointer hover:text-cyan-300 select-none">Tend. 3M${histSortArrowH('tendencia')}</th>
+              <th data-histsort="nombre" class="text-left px-3 py-2 cursor-pointer hover:text-cyan-300 select-none sticky left-0 z-20 bg-[#06091a] border-b border-white/10" style="min-width:190px">Vendedor${histSortArrowH('nombre')}</th>
+              <th class="text-left px-3 py-2 border-b border-white/10">País</th>
+              <th class="text-center px-3 py-2 border-b border-white/10">VIP</th>
+              <th class="text-center px-3 py-2 border-b border-white/10">Nivel</th>
+              ${M.map(m => `<th class="text-right px-3 py-2 whitespace-nowrap border-b border-l border-white/10" style="min-width:74px">${m.slice(5)}/${m.slice(2,4)}</th>`).join('')}
+              <th data-histsort="total" class="text-right px-3 py-2 cursor-pointer hover:text-cyan-300 select-none whitespace-nowrap border-b border-l-2 border-white/15" style="min-width:84px">Total${histSortArrowH('total')}</th>
+              <th data-histsort="tendencia" class="text-right px-3 py-2 cursor-pointer hover:text-cyan-300 select-none whitespace-nowrap border-b border-white/10" style="min-width:90px">Tend. 3M${histSortArrowH('tendencia')}</th>
             </tr>
           </thead>
           <tbody>
             ${list.slice(0,MAXROWS).map(r => {
               const t = histTrend(r.meses);
               const arrow = t.dir==='up'?'<span class="text-emerald-400">↑</span>':t.dir==='down'?'<span class="text-rose-400">↓</span>':'<span class="text-slate-500">→</span>';
+              const pctCls = t.dir==='up'?'text-emerald-300':t.dir==='down'?'text-rose-300':'text-slate-500';
               const pctTxt = (t.pct>0?'+':'') + t.pct.toFixed(0) + '%';
-              return `<tr class="hover-row border-b border-white/5">
-                <td class="py-2 text-slate-200">${tc(r.nombre)||'<span class="text-slate-600">(sin nombre)</span>'}<div class="text-[10px] text-slate-500">${r.email||''}</div></td>
-                <td class="text-slate-400">${r.pais||'—'}</td>
-                <td class="text-center">${r.vip?'<span class="pill bg-cyan-500/20 text-cyan-300 border-cyan-500/40">VIP</span>':'<span class="text-slate-600">—</span>'}</td>
-                <td class="text-center">${r.nivel?`<span class="pill bg-white/5 border-white/10 text-slate-300">${r.nivel}</span>`:'<span class="text-slate-600">—</span>'}</td>
-                ${M.map(m => `<td class="text-right font-mono ${(r.meses[m]||0)>0?'text-slate-200':'text-slate-700'}">${fmt(r.meses[m]||0)}</td>`).join('')}
-                <td class="text-right font-mono font-semibold text-emerald-300">${fmt(r.total)}</td>
-                <td class="text-right font-mono whitespace-nowrap">${arrow} ${pctTxt}</td>
+              return `<tr class="hover-row">
+                <td class="px-3 py-2 text-slate-200 sticky left-0 z-[5] bg-[#06091a] border-b border-white/5" style="min-width:190px">${tc(r.nombre)||'<span class="text-slate-600">(sin nombre)</span>'}<div class="text-[10px] text-slate-500 truncate" style="max-width:220px">${r.email||''}</div></td>
+                <td class="px-3 py-2 text-slate-400 whitespace-nowrap border-b border-white/5">${r.pais||'—'}</td>
+                <td class="px-3 py-2 text-center border-b border-white/5">${r.vip?'<span class="pill bg-cyan-500/20 text-cyan-300 border-cyan-500/40">VIP</span>':'<span class="text-slate-600">—</span>'}</td>
+                <td class="px-3 py-2 text-center border-b border-white/5">${r.nivel?`<span class="pill bg-white/5 border-white/10 text-slate-300 whitespace-nowrap">${r.nivel}</span>`:'<span class="text-slate-600">—</span>'}</td>
+                ${M.map(m => `<td class="px-3 py-2 text-right font-mono whitespace-nowrap border-b border-l border-white/5 ${(r.meses[m]||0)>0?'text-slate-200':'text-slate-700'}">${fmt(r.meses[m]||0)}</td>`).join('')}
+                <td class="px-3 py-2 text-right font-mono font-semibold text-emerald-300 whitespace-nowrap border-b border-l-2 border-white/15">${fmt(r.total)}</td>
+                <td class="px-3 py-2 text-right font-mono whitespace-nowrap border-b border-white/5 ${pctCls}">${arrow} ${pctTxt}</td>
               </tr>`;
             }).join('')}
             ${list.length>MAXROWS?`<tr><td colspan="${M.length+6}" class="text-center text-slate-500 py-3">... y ${list.length-MAXROWS} más (usa CSV/XLSX para ver todos)</td></tr>`:''}
