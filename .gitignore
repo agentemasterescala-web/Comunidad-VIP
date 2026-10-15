@@ -73,3 +73,6 @@ package-lock.json
 .vscode/
 .idea/
 *.swp
+datos/procesados/concurso_ranking.json
+datos/procesados/concurso_snapshot_*.json
+datos/procesados/concurso_config.json
