@@ -22,6 +22,7 @@ datos/procesados/writeback_run.log
 # JSONs con PII (nombres/emails/teléfonos) que el pipeline regenera solo.
 datos/procesados/pagos.json
 datos/procesados/escalafon.json
+datos/procesados/ventas_periodos.json
 
 # ── Planes/exports con PII (emails, teléfonos, nombres) ────────
 datos/procesados/plan_vip_sin_form.csv

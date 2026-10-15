@@ -13,8 +13,9 @@ Resiliencia (para no perder meses en silencio):
     tenía desaparece o cae >50%, NO se sobrescribe el maestro (falla cerrado,
     sale con código 2) para conservar el último bueno.
 """
-import os, re, glob, unicodedata, io, time
+import os, re, glob, unicodedata, io, time, json, calendar
 from collections import defaultdict, Counter
+from datetime import datetime, timezone
 import openpyxl
 
 # Paths portables — todo se resuelve relativo a la ubicación de este script.
@@ -35,37 +36,71 @@ ES_MONTHS = {
 def _strip_accents(s):
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
-def auto_discover_months():
-    """Walk recursivo bajo ROOT buscando carpetas '<MesEspañol><Año>'
-    (ej. 'Enero2026'). Devuelve {ruta_absoluta: 'YYYY-MM'}.
-    Si el mismo mes aparece en varias rutas (p. ej. 2025/Diciembre2025 y
-    2026/Diciembre2025 en Drive), solo se conserva la primera para evitar
-    doble conteo en la agregación."""
-    found = {}             # ruta -> 'YYYY-MM'
-    seen_labels = set()    # 'YYYY-MM' ya tomado
+# Convención de carpetas en Drive (originales/<Año>/<carpeta>/):
+#   Mensual:    <MesEspañol><Año>           → ej. 'Octubre2026'    (día 1 a fin de mes)
+#   Quincenal:  <MesEspañol><Año>-Q1 / -Q2  → ej. 'Octubre2026-Q1' (Q1 = 1-15, Q2 = 16-fin)
+# Dropi pasa de mensual a quincenal; ambos formatos conviven. Para un MISMO mes,
+# si existen quincenas se usan esas y se IGNORA el mensual de ese mes (no duplicar
+# ventas); si no, se usa el mensual. El maestro agrega por mes (las quincenas
+# suman al mes), así las vistas mensuales actuales no cambian.
+_CARPETA_RE = re.compile(r"^([A-Za-zÁÉÍÓÚáéíóúñÑ]+)(\d{4})(?:-Q([12]))?$", re.IGNORECASE)
+
+
+def _periodo_info(mes_name, year, q):
+    """(label 'YYYY-MM', periodo_id, inicio, fin, tipo) de una carpeta."""
+    mm = ES_MONTHS[mes_name]; y = int(year); mo = int(mm)
+    last = calendar.monthrange(y, mo)[1]
+    label = f"{year}-{mm}"
+    if q == "1":
+        return label, f"{label}-Q1", f"{label}-01", f"{label}-15", "quincena"
+    if q == "2":
+        return label, f"{label}-Q2", f"{label}-16", f"{label}-{last:02d}", "quincena"
+    return label, label, f"{label}-01", f"{label}-{last:02d}", "mes"
+
+
+def auto_discover():
+    """Descubre carpetas mensuales y quincenales. Devuelve (MONTH_MAP, PERIOD_MAP):
+      MONTH_MAP  : {ruta -> 'YYYY-MM'}                         (maestro; quincenas → su mes)
+      PERIOD_MAP : {ruta -> {label, periodo, inicio, fin, tipo}} (concurso)
+    Dedup: por mes, si hay quincenas se toman esas y se descarta el mensual; un
+    mismo (mes, quincena) o mes repetido en varias ramas → la primera carpeta."""
+    month_map, period_map = {}, {}
     if not os.path.isdir(ROOT):
-        return found
-    pat = re.compile(r"^([A-Za-zÁÉÍÓÚáéíóúñÑ]+)(\d{4})$")
+        return month_map, period_map
+    cands = []   # (label, q, pid, inicio, fin, tipo, ruta)
     for dirpath, dirnames, _ in os.walk(ROOT, followlinks=True):
-        # ordenar para que el primer match sea determinista
         dirnames.sort()
         for d in dirnames:
-            m = pat.match(d)
-            if not m: continue
-            mes_name = _strip_accents(m.group(1).lower())
-            if mes_name not in ES_MONTHS: continue
-            year = m.group(2)
-            label = f"{year}-{ES_MONTHS[mes_name]}"
-            if label in seen_labels:
-                # evitar doble conteo de la misma etiqueta (mismo mes en
-                # múltiples ubicaciones del árbol). Conservamos la primera.
+            m = _CARPETA_RE.match(d)
+            if not m:
                 continue
-            seen_labels.add(label)
-            found[os.path.join(dirpath, d)] = label
-    return found
+            mes_name = _strip_accents(m.group(1).lower())
+            if mes_name not in ES_MONTHS:
+                continue
+            label, pid, ini, fin, tipo = _periodo_info(mes_name, m.group(2), m.group(3))
+            cands.append((label, m.group(3), pid, ini, fin, tipo, os.path.join(dirpath, d)))
+    meses_con_quincena = {c[0] for c in cands if c[1]}
+    vistos = set()
+    for label, q, pid, ini, fin, tipo, ruta in cands:
+        if q is None and label in meses_con_quincena:
+            continue   # hay quincenas para ese mes → ignorar el mensual
+        clave = (label, q) if q else label
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        month_map[ruta] = label
+        period_map[ruta] = {"label": label, "periodo": pid,
+                            "inicio": ini, "fin": fin, "tipo": tipo}
+    return month_map, period_map
 
-# Mapping ruta_absoluta -> mes etiqueta (autodetectado, recursivo)
-MONTH_MAP = auto_discover_months()
+
+def auto_discover_months():
+    """Compat: solo el mapa ruta→mes (para el maestro)."""
+    return auto_discover()[0]
+
+
+# Mapas ruta→mes (maestro) y ruta→periodo (concurso), autodetectados.
+MONTH_MAP, PERIOD_MAP = auto_discover()
 
 def norm(s):
     if s is None:
@@ -298,9 +333,23 @@ def meses_conteo_maestro(path):
 
 def main():
     all_records = []
+    period_records = []   # ventas por periodo (quincena/mes), para el concurso
     failed_files = []   # (basename, mes, error) de Excels que no se pudieron abrir
     files_processed = 0
+
+    def _acc_periodo(recs):
+        for r in recs:
+            period_records.append({
+                "email": r["email"], "pais": r["pais"],
+                "entregados": r["entregados"], "devoluciones": r["devoluciones"],
+                "nombre": r["nombre"], "periodo": pinfo["periodo"], "p_label": pinfo["label"],
+                "p_inicio": pinfo["inicio"], "p_fin": pinfo["fin"], "p_tipo": pinfo["tipo"],
+            })
+
     for path, month_label in MONTH_MAP.items():
+        pinfo = PERIOD_MAP.get(path) or {
+            "periodo": month_label, "label": month_label,
+            "inicio": month_label + "-01", "fin": month_label + "-28", "tipo": "mes"}
         files = sorted(glob.glob(os.path.join(path, "*.xlsx")))
         files = [f for f in files if not os.path.basename(f).startswith("~$")]
         for fn in files:
@@ -334,6 +383,7 @@ def main():
                     recs = parse_sheet(ws, country, month_label)
                     print(f"    └ {sn} → {country}: {len(recs)} usuarios")
                     all_records.extend(recs)
+                    _acc_periodo(recs)
             else:
                 country = country_from_filename(fn)
                 # Hoja "Original" (con duplicados) o "Export" o la primera
@@ -348,6 +398,7 @@ def main():
                 recs = parse_sheet(ws, country, month_label)
                 print(f"    └ {target}: {len(recs)} usuarios")
                 all_records.extend(recs)
+                _acc_periodo(recs)
             wb.close()
 
     print(f"\nTotal registros (email, pais, mes): {len(all_records)}")
@@ -415,7 +466,7 @@ def main():
         ws.append([email, pais, mes, v["entregados"], v["devoluciones"], v["pedidos"], v["nombre"], v["telefono"]])
 
     # Pivot: una fila por email+pais con columnas mes
-    pivot = defaultdict(lambda: {m:0 for m in MONTH_MAP.values()})
+    pivot = defaultdict(lambda: {m:0 for m in set(MONTH_MAP.values())})
     meta = {}
     for (email, pais, mes), v in agg.items():
         pivot[(email, pais)][mes] += v["pedidos"]
@@ -423,7 +474,7 @@ def main():
             meta[(email,pais)] = (v["nombre"], v["telefono"])
 
     ws2 = wb_out.create_sheet("PIVOT_USUARIO_PAIS")
-    months = sorted(MONTH_MAP.values())
+    months = sorted(set(MONTH_MAP.values()))
     ws2.append(["email","pais","nombre","telefono"] + months + ["total_4m","top1","top2","suma_top2"])
     for (email,pais), monthly in sorted(pivot.items()):
         nombre, tel = meta[(email,pais)]
@@ -445,6 +496,41 @@ def main():
     # Resumen rápido
     distinct_emails = set(e for (e,_) in pivot.keys())
     print(f"   - Correos únicos (sin importar país): {len(distinct_emails)}")
+
+    # ── ventas_periodos.json: ventas por (email, país, periodo) con fechas de
+    # inicio/fin, para el concurso (granularidad quincenal/mensual). Se reconstruye
+    # completo cada corrida → idempotente. NO toca el maestro ni el dash actual.
+    agg_per = defaultdict(lambda: {"entregados": 0, "devoluciones": 0, "nombre": ""})
+    periodos_meta = {}
+    for r in period_records:
+        k = (r["email"], r["pais"], r["periodo"])
+        agg_per[k]["entregados"] += r["entregados"]
+        agg_per[k]["devoluciones"] += r["devoluciones"]
+        if not agg_per[k]["nombre"] and r["nombre"]:
+            agg_per[k]["nombre"] = r["nombre"]
+        periodos_meta.setdefault(r["periodo"], {
+            "id": r["periodo"], "mes": r["p_label"],
+            "inicio": r["p_inicio"], "fin": r["p_fin"], "tipo": r["p_tipo"]})
+    periodos_out = sorted(periodos_meta.values(), key=lambda p: (p["inicio"], p["id"]))
+    ventas_out = [
+        {"email": e, "pais": p, "periodo": per,
+         "entregados": v["entregados"], "devoluciones": v["devoluciones"],
+         "nombre": v["nombre"]}
+        for (e, p, per), v in sorted(agg_per.items())
+    ]
+    periodos_json = {
+        "generado": datetime.now(timezone.utc).isoformat(),
+        "periodos": periodos_out,
+        "ventas_por_periodo": ventas_out,
+    }
+    per_path = os.path.join(OUT_DIR, "ventas_periodos.json")
+    tmp_per = per_path + ".tmp"
+    with open(tmp_per, "w", encoding="utf-8") as f:
+        json.dump(periodos_json, f, ensure_ascii=False)
+    os.replace(tmp_per, per_path)
+    tipos = Counter(p["tipo"] for p in periodos_out)
+    print(f"✅ ventas_periodos.json · {len(periodos_out)} periodos ({dict(tipos)}) · "
+          f"{len(ventas_out)} filas (email × pais × periodo)")
 
 if __name__ == "__main__":
     main()
