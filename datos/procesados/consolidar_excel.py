@@ -39,14 +39,15 @@ def _strip_accents(s):
 # Convención de carpetas en Drive (originales/<Año>/<carpeta>/):
 #   Mensual:    <MesEspañol><Año>           → ej. 'Octubre2026'    (día 1 a fin de mes)
 #   Quincenal:  <MesEspañol><Año>-Q1 / -Q2  → ej. 'Octubre2026-Q1' (Q1 = 1-15, Q2 = 16-fin)
+#   Corte:      <MesEspañol><Año>-C<DD>     → ej. 'Octubre2026-C20' (acumulado día 1 al DD; fin = ese día)
 # Dropi pasa de mensual a quincenal; ambos formatos conviven. Para un MISMO mes,
 # si existen quincenas se usan esas y se IGNORA el mensual de ese mes (no duplicar
 # ventas); si no, se usa el mensual. El maestro agrega por mes (las quincenas
 # suman al mes), así las vistas mensuales actuales no cambian.
-_CARPETA_RE = re.compile(r"^([A-Za-zÁÉÍÓÚáéíóúñÑ]+)(\d{4})(?:-Q([12]))?$", re.IGNORECASE)
+_CARPETA_RE = re.compile(r"^([A-Za-zÁÉÍÓÚáéíóúñÑ]+)(\d{4})(?:-Q([12])|-C(\d{1,2}))?$", re.IGNORECASE)
 
 
-def _periodo_info(mes_name, year, q):
+def _periodo_info(mes_name, year, q, c=None):
     """(label 'YYYY-MM', periodo_id, inicio, fin, tipo) de una carpeta."""
     mm = ES_MONTHS[mes_name]; y = int(year); mo = int(mm)
     last = calendar.monthrange(y, mo)[1]
@@ -55,6 +56,9 @@ def _periodo_info(mes_name, year, q):
         return label, f"{label}-Q1", f"{label}-01", f"{label}-15", "quincena"
     if q == "2":
         return label, f"{label}-Q2", f"{label}-16", f"{label}-{last:02d}", "quincena"
+    if c:
+        dd = max(1, min(int(c), last))
+        return label, label, f"{label}-01", f"{label}-{dd:02d}", "mes"
     return label, label, f"{label}-01", f"{label}-{last:02d}", "mes"
 
 
@@ -77,12 +81,13 @@ def auto_discover():
             mes_name = _strip_accents(m.group(1).lower())
             if mes_name not in ES_MONTHS:
                 continue
-            label, pid, ini, fin, tipo = _periodo_info(mes_name, m.group(2), m.group(3))
-            cands.append((label, m.group(3), pid, ini, fin, tipo, os.path.join(dirpath, d)))
-    meses_con_quincena = {c[0] for c in cands if c[1]}
+            label, pid, ini, fin, tipo = _periodo_info(mes_name, m.group(2), m.group(3), m.group(4))
+            variante = m.group(3) or (f"C{m.group(4)}" if m.group(4) else None)
+            cands.append((label, variante, pid, ini, fin, tipo, os.path.join(dirpath, d)))
+    meses_con_variante = {c[0] for c in cands if c[1]}
     vistos = set()
     for label, q, pid, ini, fin, tipo, ruta in cands:
-        if q is None and label in meses_con_quincena:
+        if q is None and label in meses_con_variante:
             continue   # hay quincenas para ese mes → ignorar el mensual
         clave = (label, q) if q else label
         if clave in vistos:
@@ -520,6 +525,7 @@ def main():
     ]
     periodos_json = {
         "generado": datetime.now(timezone.utc).isoformat(),
+        "corte": (periodos_out[-1]["fin"] if periodos_out else None),
         "periodos": periodos_out,
         "ventas_por_periodo": ventas_out,
     }

@@ -45,6 +45,27 @@ def mes_label(yyyy_mm):
     return f"{ES_MONTHS_SHORT_FULL[int(m)-1]} {y}"
 
 
+def _corte_actual():
+    """Fecha de corte (fin del último periodo con datos) desde ventas_periodos.json. '' si no hay."""
+    try:
+        with open(os.path.join(HERE, "ventas_periodos.json"), encoding="utf-8") as _f:
+            return (json.load(_f).get("corte") or "")
+    except Exception:
+        return ""
+
+
+def _fecha_larga(iso):
+    p = str(iso or "").split("-")
+    if len(p) < 3:
+        return str(iso or "")
+    meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+             "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    try:
+        return f"{int(p[2])} de {meses[int(p[1]) - 1]} de {p[0]}"
+    except Exception:
+        return str(iso or "")
+
+
 # ============================================================
 # Normalización de nombres pegados (típico en data Dropi)
 # Ej: "nicolasmanrique" -> "Nicolas Manrique"
@@ -856,10 +877,13 @@ def compute_all():
         })
     historico_rows.sort(key=lambda r: -r["total"])
 
+    _corte = _corte_actual()
     return {
         "meta": {
             "ultimo_mes": LATEST,
             "ultimo_mes_label": mes_label(LATEST),
+            "ultimo_corte": _corte,
+            "ultimo_corte_label": _fecha_larga(_corte),
             "generated": datetime.now().strftime("%d de %B de %Y, %H:%M"),
             "generated_iso": datetime.now().isoformat(),
             "ventana": months,
@@ -1164,6 +1188,7 @@ function actualizarFrescura() {
   const color = seg < STALE ? 'text-green-400' : 'text-red-400';
   document.getElementById("header-meta").innerHTML =
     `Último mes cargado: <span class="text-cyan-400">${DATA.meta.ultimo_mes_label}</span>  ·  ` +
+    (DATA.meta.ultimo_corte_label ? `Ventas a corte del <span class="text-lime-400 font-semibold">${DATA.meta.ultimo_corte_label}</span>  ·  ` : '') +
     `Datos generados <span class="${color}">${txt}</span>` +
     (seg >= STALE ? ` <span class="text-red-400 font-semibold">· conviene actualizar</span>` : '');
   // Resaltar el botón cuando los datos están viejos
