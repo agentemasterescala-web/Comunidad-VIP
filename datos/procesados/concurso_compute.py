@@ -184,6 +184,8 @@ def main():
             "cid": c["id"], "nombre": nombre,
             "entregadas": ent, "devoluciones": dev, "ventas": ent - dev,
             "vp": {per: e - d for per, (e, d) in por_per.items()},  # neto por periodo
+            "ep": {per: e for per, (e, d) in por_per.items()},         # entregadas por periodo
+            "dp": {per: d for per, (e, d) in por_per.items()},         # devoluciones por periodo
         })
 
     # Orden: ventas netas desc, desempate por entregadas desc y nombre.
@@ -216,7 +218,8 @@ def main():
         ranking.append({
             "uuid": u, "alias": alias_de(r["nombre"]), "pos": i,
             "ventas": r["ventas"], "movimiento": mov, "es_nuevo": antes is None,
-            "vp": r["vp"],   # neto por periodo (para el selector quincena/mes/acumulado)
+            "entregadas": r["entregadas"], "devoluciones": r["devoluciones"],  # publicos: desglose
+            "vp": r["vp"], "ep": r["ep"], "dp": r["dp"],   # por periodo (selector)
             # Solo para el equipo logueado (el endpoint público los quita):
             "_cid": r["cid"], "_nombre": r["nombre"],
             "_entregadas": r["entregadas"], "_devoluciones": r["devoluciones"],
