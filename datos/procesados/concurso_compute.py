@@ -188,8 +188,12 @@ def main():
             "dp": {per: d for per, (e, d) in por_per.items()},         # devoluciones por periodo
         })
 
-    # Orden: ventas netas desc, desempate por entregadas desc y nombre.
-    filas.sort(key=lambda r: (-r["ventas"], -r["entregadas"], r["nombre"].lower()))
+    # Orden: ventas netas desc; desempate por EFECTIVIDAD (entregadas/pedidos resueltos)
+    # desc, luego entregadas desc y nombre.
+    def _efect(r):
+        tot = r["entregadas"] + r["devoluciones"]
+        return (r["entregadas"] / tot) if tot else 0.0
+    filas.sort(key=lambda r: (-r["ventas"], -_efect(r), -r["entregadas"], r["nombre"].lower()))
 
     ultimo = scope[-1] if scope else None
     cur_periodo = (ultimo or {}).get("id")
