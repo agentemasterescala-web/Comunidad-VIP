@@ -20,7 +20,7 @@ Modo:
               del concurso.
 Reconstruye todo cada corrida → idempotente.
 """
-import os, json, uuid, unicodedata
+import os, json, uuid, re, unicodedata
 from datetime import datetime, timezone
 
 import generar_dashboard as G  # extract_tiendas, audiencias_de, pais_canonico
@@ -115,6 +115,41 @@ def opaco(cid):
     return str(uuid.uuid5(_UUID_NS, cid or ""))
 
 
+def _tcase(s):
+    """Title-case respetando acentos ('JOSÉ maría' → 'José María')."""
+    return " ".join(w[:1].upper() + w[1:].lower() if w else w
+                    for w in (s or "").split())
+
+
+def _nombre_de_email(email):
+    """Deriva un nombre legible del correo cuando no hay nombre real
+    ('riano.dylanwork@outlook.com' → 'Riano Dylanwork')."""
+    local = (email or "").split("@")[0]
+    local = re.sub(r"[._\-]+", " ", local)
+    local = re.sub(r"\d+", "", local).strip()
+    return _tcase(local)
+
+
+def _elegir_nombre(nombres, emails):
+    """Mejor nombre legible del grupo: prefiere un nombre real (con apellido),
+    descarta correos; si no hay, lo deriva del correo."""
+    cands = []
+    for n in nombres:
+        n = " ".join((n or "").split())
+        if n and "@" not in n:
+            cands.append(n)
+    # Prioriza: con apellido (≥2 tokens) → más tokens → más largo.
+    cands.sort(key=lambda n: (0 if len(n.split()) >= 2 else 1,
+                              -len(n.split()), -len(n)))
+    if cands:
+        return _tcase(cands[0])
+    for em in sorted(emails):
+        d = _nombre_de_email(em)
+        if d:
+            return d
+    return ""
+
+
 # ──────────────────────────────── Cómputo ────────────────────────────────────
 
 def periodos_en_scope(cfg, periodos):
@@ -150,7 +185,14 @@ def main():
     with open(RAW, encoding="utf-8") as f:
         dump = json.load(f)
 
-    filas = []
+    # ── Participantes = contactos VIP AGRUPADOS por persona ──
+    # Un mismo vendedor suele tener varios contactos en GHL que comparten el
+    # mismo correo de ventas. Si se emite una fila por contacto, la misma venta
+    # de Dropi se cuenta dos veces (filas duplicadas). Aquí: (1) reunimos por
+    # contacto sus correos con ventas; (2) unimos contactos que comparten algún
+    # correo (union-find); (3) por grupo, contamos cada correo UNA sola vez y
+    # elegimos el mejor nombre legible.
+    contactos = []
     for c in dump:
         tags = [t.lower() for t in (c.get("tags") or []) if isinstance(t, str)]
         if not G.audiencias_de(tags):
@@ -159,29 +201,70 @@ def main():
         emp = (c.get("email") or "").strip().lower()
         if emp:
             emails.add(emp)
+        con_ventas = {em for em in emails
+                      if por_email.get(em) and any(p in por_email[em] for p in scope_ids)}
+        if not con_ventas:
+            continue  # VIP sin ventas en la ventana → no aparece en el ranking
+        contactos.append({
+            "cid": c["id"],
+            "nombre": (c.get("contactName") or "").strip(),
+            "emails": con_ventas,
+        })
+
+    parent = {}
+    def _find(x):
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:           # path compression
+            parent[x], x = root, parent[x]
+        return root
+    def _union(a, b):
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    email_owner = {}
+    for ct in contactos:
+        _find(ct["cid"])
+        for em in ct["emails"]:
+            if em in email_owner:
+                _union(ct["cid"], email_owner[em])
+            else:
+                email_owner[em] = ct["cid"]
+
+    grupos = {}
+    for ct in contactos:
+        g = grupos.setdefault(_find(ct["cid"]),
+                              {"cids": [], "nombres": [], "emails": set()})
+        g["cids"].append(ct["cid"])
+        if ct["nombre"]:
+            g["nombres"].append(ct["nombre"])
+        g["emails"] |= ct["emails"]
+
+    filas = []
+    for g in grupos.values():
         ent = dev = 0
         por_per = {}   # periodo → [entregadas, devoluciones]
-        tiene = False
-        for em in emails:
-            pe = por_email.get(em)
-            if not pe:
-                continue
+        for em in g["emails"]:             # cada correo del grupo cuenta UNA vez
+            pe = por_email.get(em) or {}
             for per in scope_ids:
                 if per in pe:
                     e, d = pe[per]
                     ent += e
                     dev += d
-                    tiene = True
                     acc = por_per.setdefault(per, [0, 0])
                     acc[0] += e
                     acc[1] += d
-        if not tiene:
-            continue  # VIP sin ventas en la ventana → no aparece en el ranking
-        nombre = (c.get("contactName") or "").strip()
-        if not nombre:
-            nombre = next((nombre_email[e] for e in emails if e in nombre_email), "")
+        if ent == 0 and dev == 0:
+            continue
+        cand = list(g["nombres"]) + [nombre_email[e] for e in g["emails"]
+                                     if e in nombre_email]
+        nombre = _elegir_nombre(cand, g["emails"])
+        cid = sorted(g["cids"])[0]         # representativo estable (para el UUID)
         filas.append({
-            "cid": c["id"], "nombre": nombre,
+            "cid": cid, "nombre": nombre,
             "entregadas": ent, "devoluciones": dev, "ventas": ent - dev,
             "vp": {per: e - d for per, (e, d) in por_per.items()},  # neto por periodo
             "ep": {per: e for per, (e, d) in por_per.items()},         # entregadas por periodo
