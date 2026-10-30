@@ -62,9 +62,34 @@ pip3 install --user openpyxl
 
 | Rutina | Frecuencia | Qué hace |
 |--------|-----------|----------|
-| `pipeline_diario` | cada 10 min | Pipeline completo (consolidar + refrescar GHL + reclasificar + escribir GHL + dashboard) |
-| `pipeline_dashboard` | cada 90 seg | Solo refresca contactos + reclasifica + dashboard (sin escritura a GHL) |
-| `pipeline_watcher` | ⚡ instantáneo | Detecta archivo nuevo en `datos/originales/` y dispara pipeline completo |
+| `comunidad-vip` (pipeline_diario) | cada 10 min | refrescar GHL + reclasificar + escribir GHL + dashboard (NO consolida — ver nota) |
+| `comunidad-vip-consolidar` | cada 10 min | **python directo** — lee los Excel de Drive y reconstruye `maestro_emails.xlsx` |
+| `comunidad-vip-dashboard` | cada 90 seg | Solo refresca contactos + reclasifica + dashboard (sin escritura a GHL) |
+| `comunidad-vip-watcher` | ⚡ instantáneo | Detecta archivo nuevo en `datos/originales/` y dispara pipeline |
+| `comunidad-vip-publish` | 09:00 / 10:15 / 14:00 / 18:00 | Publica el dashboard al repo de GitHub Pages |
+| `comunidad-vip-taggear-ig` | cada 10 min · python directo | Detecta desde qué IG escribió cada contacto (via `meta.ig.pageId`) y le agrega `ig-ivan-caicedo` o `ig-escala-academy`. Idempotente y no destructivo. |
+| `comunidad-vip-taggear-wa` | cada 10 min · python directo | Detecta desde qué número de WhatsApp del negocio escribió el contacto (`from`/`to` en mensajes `TYPE_WHATSAPP`) y le agrega tag `wa-<últimos-4-dígitos>`. Idempotente y no destructivo. |
+| `comunidad-vip-extraer-pagos` | cada 10 min · python directo | Lee notas GHL con título `Pago recibido App Master Escala`, parsea Tipo/Plan/Créditos/Bruto/Comisión/Neto y escribe `pagos.json` que consume la pestaña App Master Escala del dashboard. |
+| `comunidad-vip-publish-light` | cada 10 min · bash | Reclasifica + genera dashboard + pushea a `gh-pages` si el contenido cambió. **NO refresca GHL** (usa el dump que otras rutinas mantienen fresco). Con `.dashboard_content_hash` para change detection — evita commits basura. Complementa el `publish` full (09/10:15/14/18h) manteniendo la versión pública ≤10 min de rezago. |
+
+### ⚠️ Full Disk Access (acceso a Google Drive)
+
+`consolidar` lee `datos/originales/` → symlink a `~/Library/CloudStorage/GoogleDrive-…`, una
+ruta protegida por TCC. macOS solo concede el acceso al **proceso responsable**, que es el
+binario que **launchd** lanza. Por eso `consolidar` corre en su **propio agente como python
+directo** (no dentro de `pipeline_diario.sh`): un wrapper `/bin/bash` no funciona porque
+`/bin/bash` es binario de plataforma de Apple y no retiene el permiso.
+
+Hay que dar Full Disk Access **una vez** al binario real de python (Ajustes → Privacidad y
+seguridad → Acceso total al disco → `+` → tecla `/` → pegar la ruta):
+
+```
+/Library/Developer/CommandLineTools/usr/bin/python3
+```
+
+(ese es el `sys.executable` real detrás de `/usr/bin/python3`). Si falta el permiso,
+`consolidar` lee 0 registros y **no sobrescribe** el maestro (guarda anti-borrado), así que
+no se pierden datos; simplemente deja de actualizarse hasta que se conceda el permiso.
 
 ## Mantenimiento mensual
 
@@ -92,27 +117,17 @@ Funciones:
 - Persistencia de pestaña y scroll entre recargas
 - Estadísticas en tiempo real con charts (Chart.js)
 
-## Envío de correos desde el dashboard
+## Concurso — MASTER ESCALA GAMES
 
-Desde la pestaña **📈 Métricas → 👥 No están en Comunidad VIP** puedes seleccionar contactos y enviarles un correo personalizado usando Gmail SMTP (tu cuenta de Workspace).
+Ranking público en vivo del concurso de la comunidad. Temporada **oct 2026 – mar 2027** (6 meses). Gana el **TOP-3 por número de ÓRDENES ENTREGADAS** acumuladas (bolsa 130 M → 1º 100 M / 2º 20 M / 3º 10 M). **Desempate** por **% de efectividad = entregadas ÷ (entregadas + devoluciones)**. Un único ranking acumulado; se anuncia al cierre (31-mar-2027, en abril).
 
-```bash
-# 1. Configurar credenciales Gmail (una sola vez)
-nano datos/procesados/.env
-# Agregar:
-#   GMAIL_FROM=tu-correo@tudominio.com
-#   GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
-#   GMAIL_FROM_NAME=Iván Caicedo
-
-# 2. Arrancar el servidor local cuando quieras enviar
-cd datos/procesados
-python3 servidor_local.py
-
-# 3. Abrir el dashboard en http://localhost:8888
-#    (no en file:// — el envío requiere el servidor)
-```
-
-El servidor escucha en `localhost:8888`, sirve el dashboard y expone `POST /api/send-email`. Soporta variables `{nombre}`, `{email}`, `{programa}`, `{telefono}` en la plantilla.
+- **Cómputo (en este repo):** `concurso_compute.py` → `concurso_ranking.json`.
+  - Participantes = contactos VIP con ventas en la ventana, **agrupados por persona**: union-find sobre el correo de ventas → cada correo cuenta **una sola vez** (evita filas dobles cuando una persona tiene varios contactos GHL que comparten tienda). Nombres normalizados (title-case, sin correos/handles como nombre).
+  - Ordena por `entregadas`; expone también `devoluciones` y `ventas` (neto) por periodo.
+  - Config editable: `concurso_config.json` (nombre, premios, fechas, políticas/reglas) — **gitignored**; `concurso_ranking.json` también es artefacto generado (gitignored). Se regenera en `pipeline_dashboard.sh`.
+- **Fecha de corte:** el Excel de Dropi no trae fecha → la carpeta fija el corte con el sufijo `-C<DD>` (ej. `Octubre2026-C23` = corte al 23-oct). Concurso y panel VIP muestran "a corte del [fecha]".
+- **Métrica vs VIP:** ambos salen de Dropi. VIP titula con **pedidos = entregadas + devoluciones**; el concurso con **entregadas**. Las *entregadas* del concurso coinciden exactamente con las de la ficha VIP (fila del mes); `% Efect.` solo desempata. (La regla del ganador por entregadas vino del dueño/PDF; el "neto" fue provisional y se descartó.)
+- **Página pública:** vive en el repo **Dashboard_GC** (`backend/app/reto.html`), servida en `/concurso` — landing horizontal de 5 pantallas, responsive (móvil/tablet/PC sin scroll). Lee `/api/concurso/ranking` (público, sin PII); el equipo logueado usa `/api/concurso/ranking-full` y, desde el ranking, abre la ficha VIP completa del participante.
 
 ## Archivos del proyecto
 
@@ -130,7 +145,7 @@ El servidor escucha en `localhost:8888`, sirve el dashboard y expone `POST /api/
         ├── reclasificar.py        ← Aplica reglas y genera reporte
         ├── escribir_a_ghl.py      ← Escribe tags + campos en GHL
         ├── generar_dashboard.py   ← Genera dashboard.html
-        ├── servidor_local.py      ← Servidor local + endpoint Gmail SMTP
+        ├── concurso_compute.py    ← Ranking del concurso → concurso_ranking.json
         ├── pipeline_diario.sh     ← Orquestador full
         ├── pipeline_dashboard.sh  ← Orquestador ligero
         ├── pipeline_archivo_nuevo.sh  ← Disparado por watcher
