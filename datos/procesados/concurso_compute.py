@@ -188,12 +188,12 @@ def main():
             "dp": {per: d for per, (e, d) in por_per.items()},         # devoluciones por periodo
         })
 
-    # Orden: ventas netas desc; desempate por EFECTIVIDAD (entregadas/pedidos resueltos)
-    # desc, luego entregadas desc y nombre.
+    # Orden (PDF): número de ORDENES ENTREGADAS desc; desempate por EFECTIVIDAD
+    # = entregadas / (entregadas + devoluciones) desc; luego nombre.
     def _efect(r):
         tot = r["entregadas"] + r["devoluciones"]
         return (r["entregadas"] / tot) if tot else 0.0
-    filas.sort(key=lambda r: (-r["ventas"], -_efect(r), -r["entregadas"], r["nombre"].lower()))
+    filas.sort(key=lambda r: (-r["entregadas"], -_efect(r), r["nombre"].lower()))
 
     ultimo = scope[-1] if scope else None
     cur_periodo = (ultimo or {}).get("id")
@@ -262,7 +262,7 @@ def main():
     print(f"✅ concurso_ranking.json · modo={out['modo']} · "
           f"{len(ranking)} participantes · periodos={sorted(scope_ids)}")
     for r in top:
-        print(f"   {r['pos']}º {r['alias']:20} ventas={r['ventas']:>7} mov={r['movimiento']:+d}")
+        print(f"   {r['pos']}º {r['alias']:20} entregadas={r['entregadas']:>7} dev={r['devoluciones']:>5} mov={r['movimiento']:+d}")
 
 
 if __name__ == "__main__":
