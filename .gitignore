@@ -76,3 +76,5 @@ package-lock.json
 datos/procesados/concurso_ranking.json
 datos/procesados/concurso_snapshot_*.json
 datos/procesados/concurso_config.json
+datos/procesados/reto_estudiantes_ranking.json
+datos/procesados/reto_estudiantes_config.json

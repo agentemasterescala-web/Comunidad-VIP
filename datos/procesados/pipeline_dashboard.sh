@@ -33,5 +33,7 @@ fi
 /usr/bin/python3 generar_dashboard.py > /dev/null 2>&1 || exit 1
 # Ranking del concurso "Reto Más Ventas VIP" (no-fatal: no debe tumbar el dash).
 /usr/bin/python3 concurso_compute.py > /dev/null 2>&1 || true
+# Seguimiento del "Reto Máster Escala" (estudiantes). También no-fatal.
+/usr/bin/python3 reto_estudiantes_compute.py > /dev/null 2>&1 || true
 
 echo "[$(date +'%Y-%m-%d %H:%M:%S')] dashboard refreshed" >> logs/dashboard_refresh.log
