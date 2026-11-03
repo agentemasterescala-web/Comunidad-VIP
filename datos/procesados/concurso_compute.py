@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """concurso_compute.py — Ranking del "Reto Más Ventas VIP".
 
-Calcula el ranking de vendedores de la comunidad VIP por ventas NETAS
-(entregadas − devoluciones) en la ventana del concurso, a partir de:
+Calcula el ranking de vendedores de la comunidad VIP por ÓRDENES ENTREGADAS
+(desempate: menor % de devolución = devueltas ÷ movilizadas, del reporte de
+Dropi) en la ventana del concurso, a partir de:
   · ventas_periodos.json   (ventas por email×país×periodo, de consolidar_excel)
   · ghl_contacts_raw.json  (contactos GHL → criterio VIP, nombre, tiendas)
   · concurso_config.json   (nombre, premios, fechas, modo, políticas; editable
@@ -50,7 +51,7 @@ def _config_por_defecto():
         "fin": "2027-03-31",
         "cierre_iso": "2027-03-31T23:59:59-05:00",
         "premios": [100000000, 20000000, 10000000],
-        "metrica": "entregadas_menos_devoluciones",
+        "metrica": "entregadas",
         "demo": {
             "usar_periodos": ["2026-09"],
             "nota": "Datos de ejemplo (septiembre) — resultados preliminares.",
@@ -58,10 +59,13 @@ def _config_por_defecto():
         "politicas": {
             "inscripcion": "Solo participan miembros VIP registrados antes del "
                            "[FECHA DE CORTE DE INSCRIPCIÓN].",
-            "metrica": "Se cuentan las ventas entregadas, descontando devoluciones.",
+            "metrica": "La clasificación se mide por el número de ÓRDENES ENTREGADAS, "
+                       "según los reportes oficiales de Dropi.",
             "fechas": "El reto corre del 1 de octubre de 2026 al 31 de marzo de "
                       "2027. Cortes y publicación de resultados: [DETALLE].",
-            "desempate": "En caso de empate: [CRITERIO DE DESEMPATE].",
+            "desempate": "En caso de empate en órdenes entregadas, sube quien tenga "
+                         "el MENOR % de devolución (devueltas ÷ movilizadas del "
+                         "reporte de Dropi).",
             "pago_premios": "Forma y plazo de pago de premios: [DETALLE].",
             "descalificacion": "Causas de descalificación: [DETALLE].",
             "fuente": "Fuente de datos: reportes oficiales de Dropi.",
@@ -177,7 +181,7 @@ def main():
         if v["periodo"] not in scope_ids:
             continue
         por_email.setdefault(v["email"], {})[v["periodo"]] = (
-            v.get("entregados", 0), v.get("devoluciones", 0))
+            v.get("entregados", 0), v.get("devoluciones", 0), v.get("movilizadas", 0))
         if v.get("nombre") and v["email"] not in nombre_email:
             nombre_email[v["email"]] = v["nombre"]
 
@@ -245,18 +249,20 @@ def main():
 
     filas = []
     for g in grupos.values():
-        ent = dev = 0
-        por_per = {}   # periodo → [entregadas, devoluciones]
+        ent = dev = mov = 0
+        por_per = {}   # periodo → [entregadas, devoluciones, movilizadas]
         for em in g["emails"]:             # cada correo del grupo cuenta UNA vez
             pe = por_email.get(em) or {}
             for per in scope_ids:
                 if per in pe:
-                    e, d = pe[per]
+                    e, d, m = pe[per]
                     ent += e
                     dev += d
-                    acc = por_per.setdefault(per, [0, 0])
+                    mov += m
+                    acc = por_per.setdefault(per, [0, 0, 0])
                     acc[0] += e
                     acc[1] += d
+                    acc[2] += m
         if ent == 0 and dev == 0:
             continue
         cand = list(g["nombres"]) + [nombre_email[e] for e in g["emails"]
@@ -265,18 +271,21 @@ def main():
         cid = sorted(g["cids"])[0]         # representativo estable (para el UUID)
         filas.append({
             "cid": cid, "nombre": nombre,
-            "entregadas": ent, "devoluciones": dev, "ventas": ent - dev,
-            "vp": {per: e - d for per, (e, d) in por_per.items()},  # neto por periodo
-            "ep": {per: e for per, (e, d) in por_per.items()},         # entregadas por periodo
-            "dp": {per: d for per, (e, d) in por_per.items()},         # devoluciones por periodo
+            # "ventas netas" = ÓRDENES ENTREGADAS (aclaración del dueño: la métrica
+            # del ranking es entregadas, NO entregadas − devoluciones).
+            "entregadas": ent, "devoluciones": dev, "movilizadas": mov, "ventas": ent,
+            "ep": {per: v[0] for per, v in por_per.items()},   # entregadas por periodo
+            "dp": {per: v[1] for per, v in por_per.items()},   # devoluciones por periodo
+            "mp": {per: v[2] for per, v in por_per.items()},   # movilizadas por periodo
         })
 
-    # Orden (PDF): número de ORDENES ENTREGADAS desc; desempate por EFECTIVIDAD
-    # = entregadas / (entregadas + devoluciones) desc; luego nombre.
-    def _efect(r):
-        tot = r["entregadas"] + r["devoluciones"]
-        return (r["entregadas"] / tot) if tot else 0.0
-    filas.sort(key=lambda r: (-r["entregadas"], -_efect(r), r["nombre"].lower()))
+    # Orden: número de ÓRDENES ENTREGADAS desc; el que más entrega va arriba.
+    # Desempate: MENOR % de devolución del reporte de Dropi = devueltas ÷
+    # movilizadas (asc); luego nombre. No se recalcula nada: el % sale directo
+    # de las columnas del Excel.
+    def _pct_dev(r):
+        return (r["devoluciones"] / r["movilizadas"]) if r["movilizadas"] else 1.0
+    filas.sort(key=lambda r: (-r["entregadas"], _pct_dev(r), r["nombre"].lower()))
 
     ultimo = scope[-1] if scope else None
     cur_periodo = (ultimo or {}).get("id")
@@ -306,7 +315,9 @@ def main():
             "uuid": u, "alias": alias_de(r["nombre"]), "pos": i,
             "ventas": r["ventas"], "movimiento": mov, "es_nuevo": antes is None,
             "entregadas": r["entregadas"], "devoluciones": r["devoluciones"],  # publicos: desglose
-            "vp": r["vp"], "ep": r["ep"], "dp": r["dp"],   # por periodo (selector)
+            "movilizadas": r["movilizadas"],                 # denominador del % devolución
+            "pct_devolucion": round(_pct_dev(r), 4),         # devueltas ÷ movilizadas (Dropi)
+            "ep": r["ep"], "dp": r["dp"], "mp": r["mp"],     # por periodo (selector)
             # Solo para el equipo logueado (el endpoint público los quita):
             "_cid": r["cid"], "_nombre": r["nombre"],
             "_entregadas": r["entregadas"], "_devoluciones": r["devoluciones"],

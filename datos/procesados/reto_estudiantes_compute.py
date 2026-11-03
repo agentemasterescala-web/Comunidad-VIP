@@ -65,7 +65,9 @@ def _config_por_defecto():
                            "«Reto Máster Escala».",
             "medicion": "Se compara tu número de órdenes ENTREGADAS en septiembre "
                         "(línea base), octubre y noviembre, según los reportes "
-                        "oficiales de Dropi. Se muestra tu evolución mes a mes.",
+                        "oficiales de Dropi. En caso de empate, sube quien tenga el "
+                        "menor % de devolución (devueltas ÷ movilizadas del reporte). "
+                        "Se muestra tu evolución mes a mes.",
             "participacion": "Además de las ventas, se mide tu constancia en la "
                              "comunidad: quién reporta a diario, semanal o dejó de "
                              "participar.",
@@ -159,7 +161,7 @@ def main():
         if v["periodo"] not in scope_set:
             continue
         por_email.setdefault(v["email"], {})[v["periodo"]] = (
-            v.get("entregados", 0), v.get("devoluciones", 0))
+            v.get("entregados", 0), v.get("devoluciones", 0), v.get("movilizadas", 0))
         if v.get("nombre") and v["email"] not in nombre_email:
             nombre_email[v["email"]] = v["nombre"]
 
@@ -231,14 +233,16 @@ def main():
         # Agregar ventas por periodo (cada correo del grupo cuenta UNA vez).
         ep = {pid: 0 for pid in scope_ids}   # entregadas por periodo
         dp = {pid: 0 for pid in scope_ids}   # devoluciones por periodo
+        mp = {pid: 0 for pid in scope_ids}   # movilizadas por periodo (denom. del %)
         frec, posts = "", None
         for em in g["emails"]:
             pe = por_email.get(em) or {}
             for pid in scope_ids:
                 if pid in pe:
-                    e, d = pe[pid]
+                    e, d, m = pe[pid]
                     ep[pid] += e
                     dp[pid] += d
+                    mp[pid] += m
             if em in participacion:          # frecuencia/engagement por correo
                 info = participacion[em]
                 if info.get("frecuencia"):
@@ -248,6 +252,7 @@ def main():
 
         ent_reto = sum(ep[p] for p in reto_presentes)
         dev_reto = sum(dp[p] for p in reto_presentes)
+        mov_reto = sum(mp[p] for p in reto_presentes)
         ent_base = ep.get(base, 0)
         tiene_ventas = any(ep[p] or dp[p] for p in scope_ids)
 
@@ -260,23 +265,25 @@ def main():
                                      if e in nombre_email]
         nombre = CC._elegir_nombre(cand, g["emails"])
         cid = sorted(g["cids"])[0]
-        tot_reto = ent_reto + dev_reto
         filas.append({
             "cid": cid, "nombre": nombre,
             "es_participante": g["es_part"],
             "es_master": g["es_prog"],
             "frecuencia": frec,
             "posts_semana": posts,
-            "ep": ep, "dp": dp,
+            "ep": ep, "dp": dp, "mp": mp,
             "entregadas_base": ent_base,
             "entregadas_reto": ent_reto, "devoluciones_reto": dev_reto,
-            "efect_reto": (ent_reto / tot_reto) if tot_reto else 0.0,
+            "movilizadas_reto": mov_reto,
+            # Desempate coherente con el concurso: MENOR % de devolución del
+            # reporte de Dropi (devueltas ÷ movilizadas), no una efectividad aparte.
+            "pct_dev_reto": (dev_reto / mov_reto) if mov_reto else 1.0,
             "delta_reto": ent_reto - ent_base,   # crecimiento vs base (informativo)
         })
 
     # Orden: órdenes ENTREGADAS en la ventana del reto (oct+nov) desc; desempate
-    # por efectividad desc; luego nombre. (Mismo espíritu que el concurso.)
-    filas.sort(key=lambda r: (-r["entregadas_reto"], -r["efect_reto"],
+    # por MENOR % de devolución asc; luego nombre. (Mismo criterio que el concurso.)
+    filas.sort(key=lambda r: (-r["entregadas_reto"], r["pct_dev_reto"],
                               r["nombre"].lower()))
 
     ranking = []
@@ -286,10 +293,12 @@ def main():
             "pos": i,
             "es_participante": r["es_participante"], "es_master": r["es_master"],
             "frecuencia": r["frecuencia"], "posts_semana": r["posts_semana"],
-            "ep": r["ep"], "dp": r["dp"],
+            "ep": r["ep"], "dp": r["dp"], "mp": r["mp"],
             "entregadas_base": r["entregadas_base"],
             "entregadas_reto": r["entregadas_reto"],
             "devoluciones_reto": r["devoluciones_reto"],
+            "movilizadas_reto": r["movilizadas_reto"],
+            "pct_dev_reto": round(r["pct_dev_reto"], 4),
             "delta_reto": r["delta_reto"],
             # Solo equipo logueado (el endpoint público los quita):
             "_cid": r["cid"], "_nombre": r["nombre"],

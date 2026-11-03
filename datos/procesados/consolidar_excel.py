@@ -256,27 +256,31 @@ def parse_sheet(ws, country, month_label):
         email_norm = email.lower()
         nombre = row[col_nombre] if col_nombre is not None and col_nombre < len(row) else None
         tel = row[col_tel] if col_tel is not None and col_tel < len(row) else None
-        ent = row[col_entregados] if col_entregados < len(row) else 0
-        try:
-            ent = int(float(ent)) if ent not in (None, "") else 0
-        except (TypeError, ValueError):
-            ent = 0
+        def _int(v):
+            try:
+                return int(float(v)) if v not in (None, "") else 0
+            except (TypeError, ValueError):
+                return 0
+        ent = _int(row[col_entregados]) if col_entregados < len(row) else 0
+        # Movilizadas: es el DENOMINADOR del "% Devolución (órdenes)" de Dropi,
+        # que el reporte calcula como devueltas ÷ movilizadas (verificado contra
+        # los datos reales). La guardamos para poder reproducir ese % tal cual,
+        # sin recalcular ninguna fórmula propia.
+        mov = None
+        if col_movilizadas is not None and col_movilizadas < len(row):
+            mov = _int(row[col_movilizadas])
         # Devoluciones: si existe columna, usarla directamente. Si no, derivar de
         # (movilizadas - entregadas) — equivale a "devoluciones" del formato viejo,
         # ya que movilizadas = entregadas + devoluciones en el formato Jul 2026+.
         if col_devoluciones is not None:
-            dev = row[col_devoluciones] if col_devoluciones < len(row) else 0
-            try:
-                dev = int(float(dev)) if dev not in (None, "") else 0
-            except (TypeError, ValueError):
-                dev = 0
+            dev = _int(row[col_devoluciones]) if col_devoluciones < len(row) else 0
         else:
-            mov = row[col_movilizadas] if col_movilizadas < len(row) else 0
-            try:
-                mov = int(float(mov)) if mov not in (None, "") else 0
-            except (TypeError, ValueError):
-                mov = 0
-            dev = max(0, mov - ent)  # nunca negativo
+            dev = max(0, (mov or 0) - ent)  # nunca negativo
+        # Si el formato viejo no trae movilizadas, la aproximamos como
+        # entregadas + devoluciones para que el % de devolución siga siendo
+        # calculable y el denominador nunca quede en cero.
+        if not mov:
+            mov = ent + dev
         pedidos = ent + dev
         out.append({
             "email": email_norm,
@@ -286,6 +290,7 @@ def parse_sheet(ws, country, month_label):
             "mes": month_label,
             "entregados": ent,
             "devoluciones": dev,
+            "movilizadas": mov,
             "pedidos": pedidos,
         })
     return out
@@ -347,6 +352,7 @@ def main():
             period_records.append({
                 "email": r["email"], "pais": r["pais"],
                 "entregados": r["entregados"], "devoluciones": r["devoluciones"],
+                "movilizadas": r["movilizadas"],
                 "nombre": r["nombre"], "periodo": pinfo["periodo"], "p_label": pinfo["label"],
                 "p_inicio": pinfo["inicio"], "p_fin": pinfo["fin"], "p_tipo": pinfo["tipo"],
             })
@@ -505,12 +511,13 @@ def main():
     # ── ventas_periodos.json: ventas por (email, país, periodo) con fechas de
     # inicio/fin, para el concurso (granularidad quincenal/mensual). Se reconstruye
     # completo cada corrida → idempotente. NO toca el maestro ni el dash actual.
-    agg_per = defaultdict(lambda: {"entregados": 0, "devoluciones": 0, "nombre": ""})
+    agg_per = defaultdict(lambda: {"entregados": 0, "devoluciones": 0, "movilizadas": 0, "nombre": ""})
     periodos_meta = {}
     for r in period_records:
         k = (r["email"], r["pais"], r["periodo"])
         agg_per[k]["entregados"] += r["entregados"]
         agg_per[k]["devoluciones"] += r["devoluciones"]
+        agg_per[k]["movilizadas"] += r["movilizadas"]
         if not agg_per[k]["nombre"] and r["nombre"]:
             agg_per[k]["nombre"] = r["nombre"]
         periodos_meta.setdefault(r["periodo"], {
@@ -520,7 +527,7 @@ def main():
     ventas_out = [
         {"email": e, "pais": p, "periodo": per,
          "entregados": v["entregados"], "devoluciones": v["devoluciones"],
-         "nombre": v["nombre"]}
+         "movilizadas": v["movilizadas"], "nombre": v["nombre"]}
         for (e, p, per), v in sorted(agg_per.items())
     ]
     periodos_json = {
