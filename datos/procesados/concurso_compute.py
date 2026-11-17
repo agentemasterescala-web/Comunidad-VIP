@@ -199,8 +199,13 @@ def main():
     contactos = []
     for c in dump:
         tags = [t.lower() for t in (c.get("tags") or []) if isinstance(t, str)]
-        if not G.audiencias_de(tags):
-            continue  # fuera de la comunidad VIP
+        # Requisito del concurso: el participante DEBE estar registrado por
+        # formulario, es decir tener el tag 'comunidad vip new'. Tener además
+        # 'escala'/'iniciacion' (estudiante) está bien, pero sin 'comunidad vip
+        # new' queda fuera. Esto excluye a los 'vip sin form' (no diligenciaron
+        # el formulario), según la regla de inscripción del concurso.
+        if "comunidad vip new" not in tags:
+            continue  # no registrado por formulario → no participa
         emails = {t["email"] for t in G.extract_tiendas(c)}
         emp = (c.get("email") or "").strip().lower()
         if emp:
